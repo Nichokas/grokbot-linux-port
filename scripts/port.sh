@@ -7,7 +7,7 @@ set -euo pipefail
 # extracts the embedded Electron application without Wine (7z x app-64.7z),
 # fuses it with the official Electron 42.1.0 Linux binary, rebuilds the six
 # native modules against the target Electron, and assembles distributable
-# artefacts (tar.gz mandatory; deb/AppImage best-effort).
+# artefacts (tar.gz always; AppImage when tooling is available).
 #
 # Usage:
 #   scripts/port.sh 0.19.0
@@ -422,10 +422,7 @@ main() {
   fi
 
   # -----------------------------------------------------------------------
-  # 8. Create distributable artefacts
-  #
-  # tar.gz is mandatory (always produced). deb/AppImage are best-effort and
-  # depend on optional tooling (electron-installer-debian, electron-builder).
+  # 8. Create distributable artefacts (tar.gz always; AppImage when possible)
   # -----------------------------------------------------------------------
   local artifacts=()
 
@@ -436,40 +433,152 @@ main() {
   artifacts+=("${tarball}")
   echo "Tarball: $(du -h "${tarball}" | cut -f1) ${tarball}" >&2
 
-  # 8b. deb — via electron-installer-debian when available
-  if command -v electron-installer-debian >/dev/null 2>&1 || npx --yes electron-installer-debian --help >/dev/null 2>&1; then
-    echo "Attempting .deb creation (best-effort)..." >&2
-    local deb_out="${outdir}/deb"
-    mkdir -p "${deb_out}"
-    # Derive a Debian-friendly version (strip leading v, ensure valid)
-    local deb_version="${GROK_VERSION}"
-    # Minimal debian config — installer reads package.json for metadata when
-    # available, otherwise uses supplied options.
-    if ! npx --yes electron-installer-debian \
-        --src "${staged}" \
-        --dest "${deb_out}" \
-        --arch amd64 \
-        --options.version "${deb_version}" 2>&1; then
-      echo "warn: electron-installer-debian failed — skipping .deb" >&2
-    else
-      for deb in "${deb_out}"/*.deb; do
-        [[ -f "${deb}" ]] || continue
-        local final_deb="${outdir}/$(basename "${deb}")"
-        # Normalise name to Grok_Bot_<ver>_linux_x64.deb when possible
-        mv "${deb}" "${final_deb}" 2>/dev/null || cp "${deb}" "${final_deb}"
-        artifacts+=("${final_deb}")
-        echo "Deb: ${final_deb}" >&2
+  # 8b. AppImage — via AppDir + appimagetool (no electron-builder required)
+  #
+  # chrome-sandbox cannot be setuid inside an AppImage (squashfs built as
+  # non-root), so AppRun forces --no-sandbox. Users needing a strict sandbox
+  # should use the tarball with `sudo chown root:root chrome-sandbox`.
+  # Best-effort: failures are warned, never fatal to the tarball.
+  if command -v mksquashfs >/dev/null 2>&1; then
+    echo "Attempting AppImage creation..." >&2
+    local appimage_name="Grok_Bot_${GROK_VERSION}_x86_64.AppImage"
+    local appimage_path="${outdir}/${appimage_name}"
+    local appdir="${workdir}/AppDir"
+
+    rm -rf "${appdir}"
+    mkdir -p "${appdir}/usr/bin" \
+             "${appdir}/usr/share/applications" \
+             "${appdir}/usr/share/icons/hicolor/256x256/apps"
+
+    cp -a "${staged}/." "${appdir}/usr/bin/"
+
+    local icon_src=""
+    local icon_candidates=(
+      "${staged}/resources/app.asar.unpacked/dist/renderer/assets/app-icon-C7NKj2u7.png"
+    )
+    # Also probe extracted asar for version-pinned icon names
+    local asar_icon_probe=""
+    if command -v python3 >/dev/null 2>&1; then
+      asar_icon_probe="$(python3 -c "
+import subprocess, sys, json, os, pathlib
+staged = sys.argv[1]
+asar = os.path.join(staged, 'resources', 'app.asar')
+try:
+    out = subprocess.check_output(['npx','--yes','@electron/asar','list', asar], stderr=subprocess.DEVNULL, text=True, timeout=10)
+    for line in out.splitlines():
+        if 'app-icon' in line and line.endswith('.png'):
+            print(line.strip())
+            break
+except Exception:
+    pass
+" "${staged}" 2>/dev/null || true)"
+      if [[ -n "${asar_icon_probe}" ]]; then
+        local tmp_icon_dir="${workdir}/asar-icon-extract"
+        mkdir -p "${tmp_icon_dir}"
+        if npx --yes @electron/asar extract "${staged}/resources/app.asar" "${tmp_icon_dir}" >/dev/null 2>&1; then
+          local extracted_icon="${tmp_icon_dir}/${asar_icon_probe#/}"
+          [[ -f "${extracted_icon}" ]] && icon_src="${extracted_icon}"
+        fi
+      fi
+    fi
+    if [[ -z "${icon_src}" ]]; then
+      for cand in "${icon_candidates[@]}"; do
+        if [[ -f "${cand}" ]]; then icon_src="${cand}"; break; fi
       done
     fi
-  else
-    echo "Skipping .deb — electron-installer-debian not installed (npm i -D electron-installer-debian to enable)." >&2
-  fi
+    if [[ -z "${icon_src}" || ! -f "${icon_src}" ]]; then
+      # Fallback: any png under staged icon paths
+      icon_src="$(find "${staged}" -name "app-icon*.png" -print -quit 2>/dev/null || true)"
+    fi
 
-  # 8c. AppImage — via electron-builder when available
-  if command -v electron-builder >/dev/null 2>&1 || npx --yes electron-builder --help >/dev/null 2>&1; then
-    echo "AppImage creation is available via electron-builder but requires a full build config — skipping in port.sh (use electron-builder manually)." >&2
+    if [[ -n "${icon_src}" && -f "${icon_src}" ]]; then
+      cp "${icon_src}" "${appdir}/grok-bot.png"
+      cp "${icon_src}" "${appdir}/.DirIcon"
+      cp "${icon_src}" "${appdir}/usr/share/icons/hicolor/256x256/apps/grok-bot.png"
+      echo "AppImage icon: ${icon_src}" >&2
+    else
+      echo "warn: no icon found for AppImage — using empty placeholder" >&2
+      : > "${appdir}/grok-bot.png"
+      : > "${appdir}/.DirIcon"
+    fi
+
+    cat > "${appdir}/grok-bot.desktop" <<'DESKTOP_EOF'
+[Desktop Entry]
+Name=Grok Bot
+GenericName=Grok Bot
+Comment=Grok Bot desktop agent
+Exec=grok-bot --no-sandbox
+Icon=grok-bot
+Type=Application
+Categories=Utility;
+Terminal=false
+StartupWMClass=grok-bot
+DESKTOP_EOF
+    # Append versioned metadata
+    echo "X-AppImage-Version=${GROK_VERSION}" >> "${appdir}/grok-bot.desktop"
+    cp "${appdir}/grok-bot.desktop" "${appdir}/usr/share/applications/grok-bot.desktop"
+
+    cat > "${appdir}/AppRun" <<'APPRUN_EOF'
+#!/bin/sh
+SELF="$(readlink -f "$0")"
+HERE="${SELF%/*}"
+exec "${HERE}/usr/bin/grok-bot" --no-sandbox "$@"
+APPRUN_EOF
+    chmod +x "${appdir}/AppRun"
+
+    # Obtain appimagetool (continuous) — best-effort download
+    local appimagetool_bin="${workdir}/appimagetool"
+    local appimagetool_ok=false
+    if command -v appimagetool >/dev/null 2>&1; then
+      appimagetool_bin="$(command -v appimagetool)"
+      appimagetool_ok=true
+    else
+      if curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \
+           --connect-timeout 15 --max-time 300 \
+           -o "${appimagetool_bin}" \
+           "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" 2>&1; then
+        chmod +x "${appimagetool_bin}"
+        # Extract to avoid FUSE requirement in CI
+        if "${appimagetool_bin}" --appimage-extract >/dev/null 2>&1; then
+          appimagetool_bin="${PWD}/squashfs-root/AppRun"
+          appimagetool_ok=true
+          # appimagetool extracts to ./squashfs-root relative to cwd — run from workdir
+          if [[ ! -f "${appimagetool_bin}" ]]; then
+            appimagetool_bin="${workdir}/squashfs-root/AppRun"
+            if [[ ! -f "${appimagetool_bin}" ]]; then
+              appimagetool_ok=false
+            fi
+          fi
+        else
+          appimagetool_ok=true
+        fi
+      else
+        echo "warn: failed to download appimagetool — skipping AppImage" >&2
+      fi
+    fi
+
+    if [[ "${appimagetool_ok}" == "true" ]]; then
+      # appimagetool may have extracted squashfs-root to CWD or workdir — resolve
+      local at_bin="${appimagetool_bin}"
+      if [[ ! -f "${at_bin}" ]]; then
+        for cand in "${PWD}/squashfs-root/AppRun" "${workdir}/squashfs-root/AppRun" "./squashfs-root/AppRun"; do
+          if [[ -f "${cand}" ]]; then at_bin="${cand}"; break; fi
+        done
+      fi
+      # Run from workdir so relative squashfs-root resolves; force arch
+      if ! (cd "${workdir}" 2>/dev/null; ARCH=x86_64 "${at_bin}" "${appdir}" "${appimage_path}" 2>&1); then
+        echo "warn: appimagetool failed — skipping AppImage" >&2
+        rm -f "${appimage_path}" 2>/dev/null || true
+      else
+        if [[ -f "${appimage_path}" ]]; then
+          artifacts+=("${appimage_path}")
+          echo "AppImage: $(du -h "${appimage_path}" | cut -f1) ${appimage_path}" >&2
+        fi
+      fi
+      rm -rf "${workdir}/squashfs-root" ./squashfs-root 2>/dev/null || true
+    fi
   else
-    echo "Skipping AppImage — electron-builder not installed." >&2
+    echo "Skipping AppImage — mksquashfs not found (install squashfs-tools)." >&2
   fi
 
   # -----------------------------------------------------------------------

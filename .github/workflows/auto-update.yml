@@ -80,9 +80,9 @@ jobs:
   # it wine-less (7z x; the app-64.7z payload is located recursively — current
   # installers nest it under $PLUGINSDIR/), fuses the payload with Electron
   # 42.1.0 linux-x64, rebuilds the six native modules via @electron/rebuild,
-  # fixes chrome-sandbox permissions, and emits tar.gz (+ deb/AppImage
-  # best-effort). Arch matrix is present so arm64 can be enabled by expanding
-  # `arch`.
+  # fixes chrome-sandbox permissions, and emits tar.gz (always) and
+  # AppImage (best-effort via AppDir + appimagetool). Arch matrix is present
+  # so arm64 can be enabled by expanding `arch`.
   # -----------------------------------------------------------------------
   build:
     needs: detect-version
@@ -132,7 +132,7 @@ jobs:
           # Electron archive; build-essential + python3 for node-gyp native
           # rebuilds (better-sqlite3, tree-sitter, etc.).
           sudo apt-get install -y --no-install-recommends \
-            p7zip-full unzip build-essential python3
+            p7zip-full unzip squashfs-tools build-essential python3
 
       - name: Install Node dependencies (rebuild tooling)
         run: |
@@ -164,7 +164,6 @@ jobs:
           name: grokbot-linux-${{ needs.detect-version.outputs.version }}-${{ matrix.arch }}
           path: |
             dist/*.tar.gz
-            dist/*.deb
             dist/*.AppImage
           if-no-files-found: error
           retention-days: 7
@@ -233,13 +232,12 @@ jobs:
 
             **Artefacts**
 
-            - `Grok_Bot_<version>_linux_x64.tar.gz` — portable archive (always)
-            - `.deb` / `.AppImage` — best-effort, present when packaging tooling succeeds
+            - `Grok_Bot_<version>_linux_x64.tar.gz` — portable archive
+            - `Grok_Bot_<version>_x86_64.AppImage` — AppImage (best-effort, requires squashfs-tools + appimagetool)
 
             *Automated build — triggered by daily HEAD-probing of `https://downloads.cursor.com/grokbot/stable/win32-x64/<version>/Grok_Bot_<version>_Setup.exe`.*
           files: |
             dist/*.tar.gz
-            dist/*.deb
             dist/*.AppImage
           generate_release_notes: false
           fail_on_unmatched_files: false

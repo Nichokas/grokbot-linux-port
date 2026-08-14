@@ -59,9 +59,8 @@ Given a verified version, `port.sh` performs the wine-less port:
    via `npx @electron/rebuild --version 42.1.0` (best-effort; the payload is still produced when the rebuild is unavailable).
 7. Fix `chrome-sandbox` to `root:root 4755` when running as root; otherwise emit a warning with remediation instructions.
 8. Emit artefacts into `dist/`:
-   - `Grok_Bot_<ver>_linux_x64.tar.gz` — **always** produced (canonical portable artefact).
-   - `.deb` — best-effort via `electron-installer-debian`.
-   - `.AppImage` — best-effort note; requires `electron-builder` with a full build configuration.
+   - `Grok_Bot_<ver>_linux_x64.tar.gz` — **always** produced (canonical portable archive).
+   - `Grok_Bot_<ver>_x86_64.AppImage` — best-effort via `AppDir` + `appimagetool` (requires `squashfs-tools`; AppRun forces `--no-sandbox`, use the tarball for a setuid sandbox).
 
 ### Automation (`.github/workflows/auto-update.yml`)
 
@@ -159,9 +158,8 @@ Environment:
 
 | Artefact | Produced | Notes |
 |----------|----------|-------|
-| `Grok_Bot_<ver>_linux_x64.tar.gz` | always | Canonical. Extract and run. |
-| `Grok_Bot_<ver>_linux_x64.deb` | best-effort | Requires `electron-installer-debian`. |
-| `Grok_Bot_<ver>_linux_x64.AppImage` | best-effort | Requires `electron-builder` with full config. |
+| `Grok_Bot_<ver>_linux_x64.tar.gz` | always | Extract and run. |
+| `Grok_Bot_<ver>_x86_64.AppImage` | best-effort | Requires `squashfs-tools` + `appimagetool` (AppRun uses `--no-sandbox`). |
 
 Only `x64` is built in CI; `arm64` can be enabled by expanding the `arch` matrix in `auto-update.yml` and mapping the Electron download URL accordingly.
 
