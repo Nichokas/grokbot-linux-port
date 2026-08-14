@@ -177,24 +177,34 @@ main() {
   # then:
   #   7z x app-64.7z
   # No Wine component is ever invoked.
+  #
+  # Layout caveat: where the payload lands is upstream-defined and has
+  # changed over time. Older installers placed app-64.7z at the extraction
+  # root; current ones (observed 0.20.0) nest it under $PLUGINSDIR/.
+  # Hard-coding either location is fragile — locate the archive recursively.
   # -----------------------------------------------------------------------
   local nsis_dir app_archive
   nsis_dir="${workdir}/nsis"
   mkdir -p "${nsis_dir}"
   pushd "${nsis_dir}" >/dev/null
   echo "Extracting NSIS installer (wine-less)..." >&2
-  "${SEVEN_ZIP}" x -y "${installer_path}" >/dev/null
+  # Not redirected to /dev/null: 7z warnings (e.g. "BadCmd=11" on NSIS-3
+  # Unicode under p7zip 16.02) are the only extraction diagnostics available
+  # in CI logs, and stdout carries no secrets in this pipeline.
+  "${SEVEN_ZIP}" x -y "${installer_path}" >&2
 
-  # Locate the embedded 7z payload. Naming has been stable as app-64.7z since
-  # the x64-only era; retain app-32.7z fallback for historical installers.
-  if [[ -f "app-64.7z" ]]; then
-    app_archive="app-64.7z"
-  elif [[ -f "app-32.7z" ]]; then
-    app_archive="app-32.7z"
-  else
+  # NSIS applies restrictive directory modes (drwx------) that would break a
+  # non-root consumer of the staged tree; normalise to standard permissions.
+  find . -type d -exec chmod 755 {} + 2>/dev/null || true
+
+  # Locate the embedded 7z payload wherever 7z placed it (root, $PLUGINSDIR,
+  # or future nesting). -print -quit stops at the first hit; identical names
+  # deeper in the tree are installer scratch copies, not additional payloads.
+  app_archive="$(find . -type f \( -name 'app-64.7z' -o -name 'app-32.7z' \) -print -quit 2>/dev/null || true)"
+  if [[ -z "${app_archive}" ]]; then
     echo "error: no app-64.7z or app-32.7z found after NSIS extraction" >&2
-    echo "contents of nsis dir:" >&2
-    ls -la >&2
+    echo "contents of nsis dir (recursive, depth 3):" >&2
+    find . -maxdepth 3 | sort >&2
     exit 1
   fi
   echo "Found embedded archive: ${app_archive}" >&2
