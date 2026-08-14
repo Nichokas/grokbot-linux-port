@@ -1,0 +1,248 @@
+name: Auto Update
+
+"on":
+  schedule:
+    # 37 minutes past 06:00 UTC — deliberately off :00/:30 to avoid the
+    # thundering herd that concentrates load on shared GitHub Actions
+    # runners and on the upstream downloads.cursor.com origin.
+    - cron: "37 6 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Grok Bot version to build (e.g. 0.19.0) — bypasses candidate probing"
+        required: false
+        default: ""
+        type: string
+
+# Least-privilege default; release job elevates contents to write via
+# permissions block.  Top-level permissions are the fallback for any job
+# that does not declare its own.
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-update
+  cancel-in-progress: false
+
+jobs:
+  # -----------------------------------------------------------------------
+  # detect-version — version-anchored HEAD-probing discovery
+  #
+  # Reads the current VERSION file as base, generates the candidate set
+  # covering non-linear jumps (patch sweep, minor sweep, next-patch,
+  # major sweep), HEAD-probes each win32 artifact URL, selects the highest
+  # semver candidate returning 200, and decides whether a build is warranted.
+  # When workflow_dispatch supplies inputs.version, that version is verified
+  # directly and treated as authoritative irrespective of the candidate set.
+  # -----------------------------------------------------------------------
+  detect-version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.detect.outputs.version }}
+      is_new: ${{ steps.detect.outputs.is_new }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Detect latest Grok Bot version
+        id: detect
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # Forward dispatch input as positional arg when present; the script
+          # also honours INPUT_VERSION directly so either path is covered.
+          if [[ -n "${INPUT_VERSION:-}" ]]; then
+            bash scripts/detect-version.sh "${INPUT_VERSION}"
+          else
+            bash scripts/detect-version.sh
+          fi
+          # The script writes version/is_new to $GITHUB_OUTPUT and prints the
+          # bare version as its last stdout line — capture both for the log.
+          echo "detect-version outputs: version=$(grep '^version=' "$GITHUB_OUTPUT" | cut -d= -f2) is_new=$(grep '^is_new=' "$GITHUB_OUTPUT" | cut -d= -f2)"
+
+  # -----------------------------------------------------------------------
+  # build — produce Linux artefacts for the detected version
+  #
+  # Runs port.sh <version> which downloads the win32 NSIS installer, extracts
+  # it wine-less (7z x app-64.7z), fuses the payload with Electron 42.1.0
+  # linux-x64, rebuilds the six native modules via @electron/rebuild, fixes
+  # chrome-sandbox permissions, and emits tar.gz (+ deb/AppImage best-effort).
+  # Arch matrix is present so arm64 can be enabled by expanding `arch`.
+  # -----------------------------------------------------------------------
+  build:
+    needs: detect-version
+    if: needs.detect-version.outputs.is_new == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64]
+        # To enable arm64, extend to [x64, arm64] and add a conditional
+        # electron arch mapping inside the build step (x64 -> x64, arm64 ->
+        # arm64) and adjust the Electron download URL accordingly.
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Cache Electron binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/electron
+          key: electron-42.1.0-${{ matrix.arch }}-${{ hashFiles('scripts/port.sh') }}
+          restore-keys: |
+            electron-42.1.0-${{ matrix.arch }}-
+            electron-42.1.0-
+
+      - name: Install system dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          # p7zip-full provides 7z for wine-less NSIS extraction; unzip for
+          # Electron archive; build-essential + python3 for node-gyp native
+          # rebuilds (better-sqlite3, tree-sitter, etc.).
+          sudo apt-get install -y --no-install-recommends \
+            p7zip-full unzip build-essential python3
+
+      - name: Install Node dependencies (rebuild tooling)
+        run: |
+          set -euo pipefail
+          # Install rebuild and packaging tooling.  --no-save keeps the repo
+          # package.json untouched — these are ephemeral CI dependencies.
+          if [[ -f package.json ]]; then
+            npm install --no-audit --no-fund
+          fi
+          npm install --no-save --no-audit --no-fund \
+            @electron/rebuild \
+            @electron/asar
+
+      - name: Build Linux port for ${{ needs.detect-version.outputs.version }}
+        env:
+          GROK_VERSION: ${{ needs.detect-version.outputs.version }}
+          ELECTRON_VERSION: "42.1.0"
+        run: |
+          set -euo pipefail
+          echo "Building Grok Bot ${GROK_VERSION} for linux-${{ matrix.arch }} (Electron ${ELECTRON_VERSION})"
+          bash scripts/port.sh "${GROK_VERSION}"
+          echo "Build artefacts:"
+          ls -lh dist/ || true
+
+      - name: Upload build artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: grokbot-linux-${{ needs.detect-version.outputs.version }}-${{ matrix.arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.deb
+            dist/*.AppImage
+          if-no-files-found: error
+          retention-days: 7
+
+  # -----------------------------------------------------------------------
+  # release — publish GitHub Release, upload artefacts, bump VERSION
+  #
+  # Downloads the build artefacts, creates (or updates) a GitHub Release via
+  # softprops/action-gh-release, commits the new VERSION file, and pushes the
+  # tag.  Uses GITHUB_TOKEN with contents:write.
+  # -----------------------------------------------------------------------
+  release:
+    needs: [detect-version, build]
+    if: needs.detect-version.outputs.is_new == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Full history required for tag creation and for the VERSION commit
+          # to be pushed on top of the current HEAD.
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Download build artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artefacts
+        run: |
+          set -euo pipefail
+          echo "Release artefacts:"
+          ls -lh dist/ || true
+          find dist -type f -exec ls -lh {} \;
+
+      - name: Fix chrome-sandbox permissions in tarball (post-hoc note)
+        run: |
+          echo "Note: chrome-sandbox inside the tarball is set to 4755 during build when running as root."
+          echo "Consumers extracting as non-root must run: sudo chown root:root chrome-sandbox && sudo chmod 4755 chrome-sandbox"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.detect-version.outputs.version }}
+          name: Grok Bot ${{ needs.detect-version.outputs.version }} (Linux port)
+          body: |
+            Linux port of Grok Bot `${{ needs.detect-version.outputs.version }}`.
+
+            Built from the official Windows distribution via wine-less extraction (`7z x app-64.7z`) fused with Electron 42.1.0 (linux-x64), with native modules rebuilt via `@electron/rebuild`.
+
+            **Install**
+
+            ```bash
+            tar -xzf Grok_Bot_${{ needs.detect-version.outputs.version }}_linux_x64.tar.gz
+            cd Grok_Bot_${{ needs.detect-version.outputs.version }}_linux_x64
+            # chrome-sandbox requires setuid when not using --no-sandbox
+            sudo chown root:root chrome-sandbox && sudo chmod 4755 chrome-sandbox
+            ./grok-bot
+            ```
+
+            **Artefacts**
+
+            - `Grok_Bot_<version>_linux_x64.tar.gz` — portable archive (always)
+            - `.deb` / `.AppImage` — best-effort, present when packaging tooling succeeds
+
+            *Automated build — triggered by daily HEAD-probing of `https://downloads.cursor.com/grokbot/stable/win32-x64/<version>/Grok_Bot_<version>_Setup.exe`.*
+          files: |
+            dist/*.tar.gz
+            dist/*.deb
+            dist/*.AppImage
+          generate_release_notes: false
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update VERSION file and push
+        env:
+          DETECTED_VERSION: ${{ needs.detect-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          echo "${DETECTED_VERSION}" > VERSION
+          echo "Updated VERSION to ${DETECTED_VERSION}"
+          cat VERSION
+
+          # Configure git identity for the automated commit
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Commit only if VERSION actually changed — avoids empty commits on
+          # re-runs where the tag already existed but is_new was true.
+          if git diff --quiet -- VERSION; then
+            echo "VERSION unchanged — skipping commit."
+            exit 0
+          fi
+
+          git add VERSION
+          git commit -m "chore: bump VERSION to ${DETECTED_VERSION}"
+          git push origin HEAD:${{ github.ref_name || 'main' }}
