@@ -13,7 +13,7 @@ yay -S grokbot-linux-port-bin   # binario precompilado, recomendado
 yay -S grokbot-linux-port       # desde fuente (compila 6 módulos nativos)
 ```
 
-**Fedora (COPR):**
+**Fedora (COPR): WIP!!**
 
 ```bash
 sudo dnf copr enable nichokas/grokbot-linux-port
