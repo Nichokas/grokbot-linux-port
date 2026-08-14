@@ -35,6 +35,6 @@ pkgbase = grokbot-linux-port
 	conflicts = grokbot-linux-port-bin
 	conflicts = grok-bot
 	source = grokbot-linux-port-0.20.0.tar.gz::https://github.com/Nichokas/grokbot-linux-port/archive/v0.20.0.tar.gz
-	sha256sums = 0998399204995f3c53a01096a73600704beea39d3686e8c849642eee5a4da67f
+	sha256sums = 37fb7775c22e693b02f4b8528de107013272df538335de2183128ac8352e8100
 
 pkgname = grokbot-linux-port
