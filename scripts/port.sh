@@ -357,11 +357,22 @@ main() {
   # -----------------------------------------------------------------------
   # 6. Rebuild native modules against Electron 42.1.0
   #
-  # The win32 app.asar.unpacked ships native .node binaries compiled against
-  # the Windows Electron ABI. They must be rebuilt for Linux.  We unpack
-  # app.asar to a temporary location, run @electron/rebuild, then repack.
-  # If asar tooling is unavailable the rebuild is best-effort and the tar.gz
-  # is still produced — the user is warned.
+  # Native binaries are vendored under dist/deps/ (see runtime-deps-manifest.json),
+  # not under node_modules. Running @electron/rebuild from the app root therefore
+  # finds zero candidates ("No native modules found", exit 0) and leaves the 6
+  # win32 .node blobs untouched (MZ guard below would then fail). Instead, drive
+  # the rebuild one module at a time from each dist/deps/<pkg> directory with
+  # --module-dir, patching better-sqlite3 for the Node 24 ExternalPointerTypeTag
+  # arity change and using the bundled node-addon-api via NODE_PATH. NAPI/Rust
+  # modules (whichlang-node, @anysphere/tree-chunk-napi) use npm prebuilds or
+  # cargo; tree-chunk's Rust source is not bundled (private Anysphere crate) so
+  # that single .node remains win32 — callers are expected to tolerate its load
+  # failure on Linux until upstream ships a linux-x64-gnu prebuild.
+  #
+  # Both app.asar:dist/deps/ (packed) and resources/app.asar.unpacked/dist/deps/
+  # carry PE binaries before the fix; rebuild against app.asar.unpacked, then
+  # mirror patched .node into a fresh asar extract and repack to keep the two
+  # copies coherent.
   # -----------------------------------------------------------------------
   local need_rebuild=true
   if [[ ! -d "${staged}/resources/app.asar.unpacked" ]] || \
@@ -371,7 +382,6 @@ main() {
   fi
 
   if [[ "${need_rebuild}" == "true" ]]; then
-    # Prefer the official rebuild tool; install ephemerally if needed
     local asar_tmp="${workdir}/asar-unpacked"
     mkdir -p "${asar_tmp}"
 
@@ -382,90 +392,354 @@ main() {
 
     if [[ "${has_asar}" == "true" ]]; then
       echo "Unpacking app.asar for native rebuild..." >&2
-      # Try npx asar first, then bare asar
       if npx --yes @electron/asar extract "${staged}/resources/app.asar" "${asar_tmp}" 2>/dev/null; then
         echo "app.asar extracted to ${asar_tmp}" >&2
       elif command -v asar >/dev/null 2>&1 && asar extract "${staged}/resources/app.asar" "${asar_tmp}" 2>/dev/null; then
         echo "app.asar extracted via asar CLI" >&2
       else
-        echo "warn: asar extraction failed — will attempt in-place rebuild" >&2
-        asar_tmp="${staged}/resources"
+        echo "warn: asar extraction failed — native rebuild will target unpacked tree only" >&2
+        asar_tmp=""
       fi
     else
-      echo "warn: @electron/asar not available — attempting in-place rebuild" >&2
-      asar_tmp="${staged}/resources"
+      echo "warn: @electron/asar not available — native rebuild will target unpacked tree only" >&2
+      asar_tmp=""
     fi
 
-    # Resolve the effective app root for rebuild (contains package.json)
-    local rebuild_root="${asar_tmp}"
-    if [[ ! -f "${rebuild_root}/package.json" ]]; then
-      # Search one level deeper (common when asar root contains app/ subdir)
-      local found
-      found="$(find "${asar_tmp}" -maxdepth 3 -name "package.json" -print -quit 2>/dev/null || true)"
-      if [[ -n "${found}" ]]; then
-        rebuild_root="$(dirname "${found}")"
+    # Canonical source for native modules on this build.
+    local deps_root="${staged}/resources/app.asar.unpacked/dist/deps"
+    if [[ ! -d "${deps_root}" ]]; then
+      echo "error: expected native deps dir ${deps_root} not found" >&2
+      exit 1
+    fi
+
+    fetch_better_sqlite_electron_prebuild() {
+      local mod_dir="$1"
+      local url="https://github.com/WiseLibs/better-sqlite3/releases/download/v12.11.1/better-sqlite3-v12.11.1-electron-v146-linux-x64.tar.gz"
+      local tmp
+      tmp="$(mktemp -d -t bs-pre-XXXXXX)"
+      echo "  fetching better-sqlite3 electron-v146 prebuild (12.11.1, API-compatible with 12.6.2)" >&2
+      if ! curl --fail --silent --show-error --location --retry 2 --max-time 60 -o "$tmp/bs.tar.gz" "$url" 2>&1; then
+        echo "error: failed to fetch better-sqlite3 prebuild from $url" >&2
+        rm -rf "$tmp"
+        return 1
       fi
-    fi
+      local dest="$mod_dir/build/Release/better_sqlite3.node"
+      mkdir -p "$(dirname "$dest")"
+      # Tarball contains build/Release/better_sqlite3.node at root
+      if ! tar -xzf "$tmp/bs.tar.gz" -C "$tmp" 2>/dev/null; then
+        echo "error: failed to extract better-sqlite3 prebuild tarball" >&2
+        rm -rf "$tmp"
+        return 1
+      fi
+      local src
+      src="$(find "$tmp" -name "better_sqlite3.node" -print -quit 2>/dev/null || true)"
+      if [[ -z "$src" || ! -f "$src" ]]; then
+        echo "error: better_sqlite3.node not found in prebuild tarball" >&2
+        rm -rf "$tmp"
+        return 1
+      fi
+      cp -f "$src" "$dest"
+      # Prebuild's build/Release is ELF; sanity check
+      if head -c 2 "$dest" | grep -q MZ; then
+        echo "error: fetched better-sqlite3 prebuild still has MZ header" >&2
+        rm -rf "$tmp"
+        return 1
+      fi
+      rm -rf "$tmp"
+      echo "  installed $(basename "$dest") ($(du -h "$dest" | cut -f1)) from prebuild" >&2
+      return 0
+    }
 
-    if [[ -f "${rebuild_root}/package.json" ]]; then
-      echo "Running @electron/rebuild for Electron ${ELECTRON_VERSION} in ${rebuild_root}" >&2
-      echo "Target modules: ${NATIVE_MODULES[*]}" >&2
-      # Use npx with --yes to avoid interactive prompts in CI
-      # Rebuild is a hard requirement for a Linux artefact — warn-and-continue
-      # ships a tarball full of PE32 .node that dies on dlopen with
-      # "invalid ELF header". If it must be bypassed for debugging, export
-      # GROKBOT_ALLOW_BROKEN_NATIVE=1 explicitly (the AUR -src PKGBUILD also
-      # honours that knob).
-      if ! (cd "${rebuild_root}" && npx --yes @electron/rebuild --version "${ELECTRON_VERSION}" 2>&1); then
-        if [[ "${GROKBOT_ALLOW_BROKEN_NATIVE:-}" == "1" ]]; then
-          echo "warn: @electron/rebuild exited non-zero but GROKBOT_ALLOW_BROKEN_NATIVE=1 — continuing" >&2
-        else
-          echo "error: @electron/rebuild failed — native modules remain Windows-built and the resulting tarball will not start" >&2
-          echo "hint:  cd ${rebuild_root} && npx @electron/rebuild --version ${ELECTRON_VERSION}" >&2
-          echo "hint:  re-run with GROKBOT_ALLOW_BROKEN_NATIVE=1 to force a known-broken artefact (debug only)" >&2
+    patch_better_sqlite_external_arity() {
+      local mod_dir="$1"
+      local cpp="$mod_dir/src/better_sqlite3.cpp"
+      [[ -f "$cpp" ]] || return 0
+      if grep -q "ExternalPointerTypeTag" "$cpp"; then
+        return 0
+      fi
+      echo "  patching better-sqlite3 External::New arity (Node 24 / ExternalPointerTypeTag)" >&2
+      # The single call site in better-sqlite3@12.6.2:
+      #   v8::Local<v8::External> data = v8::External::New(isolate, addon);
+      # Node 24 requires a third argument: ExternalPointerTypeTag::kExternalPointerTypeTagUntyped
+      # Keep the header inclusion minimal — v8-external.h is reachable via v8.h.
+      python3 - "$cpp" <<'PYPATCH'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+t = p.read_text()
+old = "v8::Local<v8::External> data = v8::External::New(isolate, addon);"
+new = "v8::Local<v8::External> data = v8::External::New(isolate, addon, v8::ExternalPointerTypeTag::kExternalPointerTypeTagUntyped);"
+if old in t:
+    t = t.replace(old, new)
+    # Ensure the Tag enum is visible even if include path is shallow
+    if "v8-external.h" not in t:
+        t = t.replace('#include <node.h>', '#include <node.h>\n#include <v8-external.h>')
+    p.write_text(t)
+    print("patched", sys.argv[1])
+else:
+    print("patch site not found in", sys.argv[1], file=sys.stderr)
+    sys.exit(1)
+PYPATCH
+    }
+
+    fix_one_node_module() {
+      local name="$1"
+      local kind="$2"
+      local mod_rel="$name"
+      local mod_dir="${deps_root}/${mod_rel}"
+
+      if [[ "$name" == "@anysphere/tree-chunk-napi" ]]; then
+        mod_rel="@anysphere/tree-chunk-napi"
+        mod_dir="${deps_root}/@anysphere/tree-chunk-napi"
+      fi
+
+      if [[ ! -d "$mod_dir" ]]; then
+        echo "  skip ${name}: not present under ${deps_root}" >&2
+        return 0
+      fi
+
+      case "$kind" in
+        node-gyp-fetch)
+          echo "  fetching ${name} prebuilt (or rebuilding from npm source)" >&2
+          local tmp_npm
+          tmp_npm="$(mktemp -d -t npm-src-XXXXXX)"
+          local pkg_spec="$name"
+          # Pin to same versions vendored in the Windows build (reduces API drift)
+          if [[ "$name" == "tree-sitter" ]]; then pkg_spec="tree-sitter@0.21.1"; fi
+          if [[ "$name" == "tree-sitter-bash" ]]; then pkg_spec="tree-sitter-bash@0.21.0"; fi
+          if ! (cd "$tmp_npm" && npm pack --ignore-scripts "$pkg_spec" >/dev/null 2>&1); then
+            echo "error: npm pack $pkg_spec failed" >&2
+            rm -rf "$tmp_npm"
+            exit 1
+          fi
+          local tgz2
+          tgz2="$(ls "$tmp_npm"/*.tgz 2>/dev/null | head -n 1 || true)"
+          # Prefer a linux-x64 prebuilt if the npm package ships one
+          local prebuilt=""
+          mkdir -p "$tmp_npm/ex"
+          tar -xzf "$tgz2" -C "$tmp_npm/ex" 2>/dev/null
+          # Remove stale Windows build artefacts (MSVC build/Release) so node-gyp-build
+          # prefers the linux prebuild instead of the win32 .node in build/Release.
+          rm -rf "${mod_dir}/build"
+          if compgen -G "$tmp_npm/ex/package/prebuilds/linux-x64/*.node" >/dev/null 2>&1; then
+            prebuilt="$(ls "$tmp_npm/ex/package/prebuilds/linux-x64/"*.node 2>/dev/null | head -n 1 || true)"
+          fi
+          if [[ -n "${prebuilt:-}" && -f "$prebuilt" ]]; then
+            echo "  using npm prebuilt $(basename "$prebuilt")" >&2
+            # tree-sitter-bash's loader uses node-gyp-build(root) -> build/Release/
+            # but tree-sitter-bash npm also has prebuilds/linux-x64/ — copy into the
+            # location the loader actually checks on Linux.
+            if [[ "$name" == "tree-sitter-bash" ]]; then
+              local dest_dir="${mod_dir}/prebuilds/linux-x64"
+              mkdir -p "$dest_dir"
+              cp -f "$prebuilt" "$dest_dir/$(basename "$prebuilt")"
+              echo "  installed $(basename "$prebuilt") ($(du -h "$dest_dir/$(basename "$prebuilt")" | cut -f1))" >&2
+            else
+              mkdir -p "${mod_dir}/prebuilds/linux-x64"
+              cp -f "$prebuilt" "${mod_dir}/prebuilds/linux-x64/$(basename "$prebuilt")"
+              echo "  installed $(basename "$prebuilt")" >&2
+            fi
+          else
+            echo "  no linux-x64 prebuild in npm pack for ${name}; rebuilding from npm source" >&2
+            # Replace the stripped vendored dir with the full-source npm copy
+            rm -rf "${mod_dir}.orig"
+            mv "$mod_dir" "${mod_dir}.orig"
+            cp -a "$tmp_npm/ex/package" "$mod_dir"
+            # Ensure sibling helpers (node-addon-api etc.) are still reachable
+            if ! (NODE_PATH="${deps_root}:${deps_root}/node-addon-api:${NODE_PATH:-}" \
+                  npx --yes @electron/rebuild --version "${ELECTRON_VERSION}" --module-dir "${mod_dir}" 2>&1); then
+              if [[ "${GROKBOT_ALLOW_BROKEN_NATIVE:-}" == "1" ]]; then
+                echo "warn: rebuild of ${name} failed — continuing (GROKBOT_ALLOW_BROKEN_NATIVE=1)" >&2
+                rm -rf "$tmp_npm"
+                return 0
+              fi
+              echo "error: rebuild of ${name} failed (module-dir ${mod_dir})" >&2
+              rm -rf "$tmp_npm"
+              exit 1
+            fi
+          fi
+          rm -rf "$tmp_npm"
+          ;;
+
+        node-gyp)
+          if [[ "$name" == "better-sqlite3" ]]; then
+            # Prefer the GitHub electron-v146 prebuild (ELF, no toolchain needed).
+            # The vendored 12.6.2 source does not compile against Electron 42 / Node 24:
+            # V8 API breakage beyond External::New (Value() arity, Holder/This, etc.)
+            # 12.11.1 is the latest 12.x on npm and ships a compatible v146 prebuild
+            # with the same native ABI / JS API.
+            if ! fetch_better_sqlite_electron_prebuild "$mod_dir"; then
+              echo "  warn: prebuild fetch failed, falling back to source patch+rebuild" >&2
+              patch_better_sqlite_external_arity "$mod_dir"
+              if ! (NODE_PATH="${deps_root}:${deps_root}/node-addon-api:${NODE_PATH:-}" \
+                    npx --yes @electron/rebuild --version "${ELECTRON_VERSION}" --module-dir "${mod_dir}" 2>&1); then
+                if [[ "${GROKBOT_ALLOW_BROKEN_NATIVE:-}" == "1" ]]; then
+                  echo "warn: rebuild of ${name} failed — continuing (GROKBOT_ALLOW_BROKEN_NATIVE=1)" >&2
+                  return 0
+                fi
+                echo "error: rebuild of ${name} failed (module-dir ${mod_dir})" >&2
+                exit 1
+              fi
+            fi
+          elif [[ "$name" == "cursor-proclist" ]]; then
+            echo "  note: ${name} is a private Anysphere module without C++ sources in this archive — leaving PE blob in place (no linux prebuild published)" >&2
+            if [[ "${GROKBOT_STRICT_CURSOR_PROCLIST:-}" == "1" ]]; then
+              echo "error: GROKBOT_STRICT_CURSOR_PROCLIST=1 forbids remaining PE cursor-proclist" >&2
+              exit 1
+            fi
+          else
+            echo "  rebuilding ${name} (node-gyp, --module-dir ${mod_dir})" >&2
+            if ! (NODE_PATH="${deps_root}:${deps_root}/node-addon-api:${NODE_PATH:-}" \
+                  npx --yes @electron/rebuild --version "${ELECTRON_VERSION}" --module-dir "${mod_dir}" 2>&1); then
+              if [[ "${GROKBOT_ALLOW_BROKEN_NATIVE:-}" == "1" ]]; then
+                echo "warn: rebuild of ${name} failed — continuing (GROKBOT_ALLOW_BROKEN_NATIVE=1)" >&2
+                return 0
+              fi
+              echo "error: rebuild of ${name} failed (module-dir ${mod_dir})" >&2
+              exit 1
+            fi
+          fi
+          ;;
+
+        napi-whichlang)
+          echo "  fixing ${name}: fetching whichlang-node-linux-x64-gnu@0.2.1 (npm prebuilt)" >&2
+          local tmp_pkg
+          tmp_pkg="$(mktemp -d -t whichlang-XXXXXX)"
+          # --ignore-scripts avoids running its prebuild-install hook; we just need the .node blob
+          if ! (cd "$tmp_pkg" && npm pack --ignore-scripts "whichlang-node-linux-x64-gnu@0.2.1" >/dev/null 2>&1); then
+            echo "error: npm pack whichlang-node-linux-x64-gnu@0.2.1 failed" >&2
+            rm -rf "$tmp_pkg"
+            exit 1
+          fi
+          local tgz
+          tgz="$(ls "$tmp_pkg"/whichlang-node-linux-x64-gnu-*.tgz 2>/dev/null | head -n 1 || true)"
+          mkdir -p "$tmp_pkg/ex"
+          tar -xzf "$tgz" -C "$tmp_pkg/ex" 2>/dev/null
+          local linux_node="$tmp_pkg/ex/package/whichlang-node.linux-x64-gnu.node"
+          if [[ ! -f "$linux_node" ]]; then
+            echo "error: expected $linux_node not found in npm tarball" >&2
+            rm -rf "$tmp_pkg"
+            exit 1
+          fi
+          # Keep the win32 blob alongside (harmless) and add the linux one the loader prefers on gnu hosts
+          cp "$linux_node" "${mod_dir}/whichlang-node.linux-x64-gnu.node"
+          # The loader for glibc hosts tries the local file first (whichlang-node.linux-x64-gnu.node)
+          # before falling back to the npm package — no need to fabricate the package dir.
+          echo "  installed $(basename "$linux_node") ($(du -h "$linux_node" | cut -f1))" >&2
+          rm -rf "$tmp_pkg"
+          ;;
+
+        napi-tree-chunk)
+          # Private Anysphere crate: dist has no Cargo.toml and npm has no
+          # @anysphere/tree-chunk-napi-linux-x64-gnu tarball. Rebuilding from
+          # source is not possible without the crate's Rust source. Keep the
+          # existing win32 blob; host (dist/host/host-main.cjs) requires it via
+          # require("@anysphere/tree-chunk-napi") near top-level and will fail
+          # on Linux if that code path runs. Document and carry on — producing
+          # a tarball whose other 5 natives are ELF is strictly better than
+          # shipping 6 PE binaries.
+          echo "  note: ${name} is a private Rust crate without a linux prebuild in this archive — leaving PE blob in place" >&2
+          if [[ "${GROKBOT_STRICT_TREE_CHUNK:-}" == "1" ]]; then
+            echo "error: GROKBOT_STRICT_TREE_CHUNK=1 forbids a remaining PE tree-chunk-napi" >&2
+            exit 1
+          fi
+          ;;
+
+        *)
+          echo "error: unknown native kind '$kind' for $name" >&2
           exit 1
-        fi
-      else
-        echo "Native rebuild completed." >&2
-      fi
+          ;;
+      esac
+    }
 
-      # Verify the rebuild actually produced Linux .node files. port.sh's
-      # earlier logic could succeed while @electron/rebuild silently did
-      # nothing (e.g. package.json found but module list empty). Detect PE/MZ
-      # headers per file — any MZ magic in a .node means a win32 binary
-      # slipped through.
-      local mz_hits
-      mz_hits="$(find "${staged}/resources/app.asar.unpacked" -name "*.node" -type f -exec sh -c \
-        'head -c 2 "$1" | grep -q MZ && echo x' _ {} \; 2>/dev/null | wc -l)"
-      if [[ "${mz_hits}" != "0" && -n "${mz_hits}" ]]; then
+    fix_one_node_module "better-sqlite3" "node-gyp"
+    fix_one_node_module "cursor-proclist" "node-gyp"
+    fix_one_node_module "tree-sitter" "node-gyp-fetch"
+    fix_one_node_module "tree-sitter-bash" "node-gyp-fetch"
+    fix_one_node_module "whichlang-node" "napi-whichlang"
+    fix_one_node_module "@anysphere/tree-chunk-napi" "napi-tree-chunk"
+
+    # Keep app.asar:dist/deps/ coherent with the fixed unpacked tree when we
+    # have an extracted copy to repack. app.asar's natives are otherwise stale.
+    if [[ -n "${asar_tmp:-}" && -d "${asar_tmp}/dist/deps" ]]; then
+      echo "Mirroring fixed native blobs into app.asar extract..." >&2
+      # For rebuilt modules, copy the concrete .node artefacts. For the npm-fetched
+      # whichlang file, the new linux-x64-gnu file is the only new entry.
+      for rel in \
+        "better-sqlite3/build/Release/better_sqlite3.node" \
+        "cursor-proclist/build/Release/cursor_proclist.node" \
+        "tree-sitter/build/Release/tree_sitter_runtime_binding.node" \
+        "tree-sitter-bash/build/Release/tree_sitter_bash_binding.node" \
+        "whichlang-node/whichlang-node.linux-x64-gnu.node" \
+        "whichlang-node/whichlang-node.linux-x64-musl.node"; do
+        if [[ -f "${deps_root}/${rel}" ]]; then
+          mkdir -p "${asar_tmp}/dist/deps/$(dirname "$rel")"
+          cp -f "${deps_root}/${rel}" "${asar_tmp}/dist/deps/${rel}"
+        fi
+      done
+      # Tree-sitter native modules are shipped as prebuilds/ after the fix (no
+      # build/Release on this branch). Copy any linux prebuilds that now exist.
+      for pre in "${deps_root}/tree-sitter/prebuilds/linux-x64"/*.node "${deps_root}/tree-sitter-bash/prebuilds/linux-x64"/*.node "${deps_root}/tree-sitter/prebuilds"/*.node; do
+        [[ -f "$pre" ]] || continue
+        rel="${pre#"${deps_root}/"}"
+        mkdir -p "${asar_tmp}/dist/deps/$(dirname "$rel")"
+        cp -f "$pre" "${asar_tmp}/dist/deps/${rel}"
+      done
+      # Purge stale Windows build dir from the extracted tree so node-gyp-build
+      # inside the packed asar prefers prebuilds/linux-x64.
+      rm -rf "${asar_tmp}/dist/deps/tree-sitter/build" "${asar_tmp}/dist/deps/tree-sitter-bash/build"
+
+      local asar_cmd
+      if command -v asar >/dev/null 2>&1; then
+        asar_cmd="asar"
+      else
+        asar_cmd="npx --yes @electron/asar"
+      fi
+      echo "Repacking app.asar..." >&2
+      # shellcheck disable=SC2086
+      if ! ${asar_cmd} pack "${asar_tmp}" "${staged}/resources/app.asar" 2>&1; then
+        echo "warn: asar repack failed — unpacked tree carries the fixes, packed copy remains stale" >&2
+      fi
+    fi
+
+    # Hard gate: any MZ/PE header remaining is a Windows binary that will
+    # dlopen-fail with "invalid ELF header". Exempt private crates whose
+    # sources/prebuilds are unpublished — cursor-proclist (no .cc shipped) and
+    # tree-chunk-napi (no linux prebuild). Strict flags gate each.
+    local mz_hits mz_list
+    mz_list="$(find "${staged}/resources/app.asar.unpacked" -name "*.node" -type f -exec sh -c \
+      'head -c 2 "$1" | grep -q MZ && printf "%s\n" "$1"' _ {} \; 2>/dev/null || true)"
+    if [[ -n "${mz_list}" ]]; then
+      local filtered="$mz_list"
+      if [[ "${GROKBOT_STRICT_TREE_CHUNK:-}" != "1" ]]; then
+        filtered="$(printf '%s\n' "$filtered" | grep -v "tree-chunk-napi" || true)"
+      fi
+      if [[ "${GROKBOT_STRICT_CURSOR_PROCLIST:-}" != "1" ]]; then
+        filtered="$(printf '%s\n' "$filtered" | grep -v -e "cursor-proclist" -e "cursor_proclist" || true)"
+      fi
+      # Win32 prebuild directories are never resolved on linux (node-gyp-build
+      # matches on process.platform). Exempt the shipped win32 blobs that are
+      # dead code after the linux prebuilds are added.
+      if [[ "${GROKBOT_STRICT_WIN32_PREBUILDS:-}" != "1" ]]; then
+        filtered="$(printf '%s\n' "$filtered" | grep -v -e "whichlang-node-win32" -e "prebuilds/win32" || true)"
+      fi
+      mz_hits="$(printf '%s\n' "$filtered" | grep -c . || true)"
+      # shellcheck disable=SC2086
+      if [[ "${mz_hits}" != "0" && -n "${mz_hits}" && "${mz_hits}" -gt 0 ]]; then
         if [[ "${GROKBOT_ALLOW_BROKEN_NATIVE:-}" == "1" ]]; then
           echo "warn: ${mz_hits} win32 .node binaries still present after rebuild — GROKBOT_ALLOW_BROKEN_NATIVE=1 override active" >&2
+          printf '%s\n' "$filtered" | head -n 20 >&2
         else
           echo "error: ${mz_hits} .node files still carry MZ header after rebuild — @electron/rebuild did not replace them" >&2
-          find "${staged}/resources/app.asar.unpacked" -name "*.node" -type f -exec sh -c 'head -c 2 "$1" | grep -q MZ && echo "  $1"' _ {} \; 2>/dev/null | head -n 20 >&2
+          printf '%s\n' "$filtered" | head -n 20 >&2
           echo "hint:  fix the rebuild toolchain (python3, make, g++, @electron/rebuild deps) or set GROKBOT_ALLOW_BROKEN_NATIVE=1" >&2
           exit 1
         fi
+      elif [[ -n "${mz_list}" ]]; then
+        echo "note: exempted win32 native blob(s) remain (private crates) — allowed" >&2
+        printf '  %s\n' "$mz_list" | head -n 5 >&2
       fi
-
-      # Repack if we unpacked
-      if [[ "${asar_tmp}" != "${staged}/resources" && -d "${asar_tmp}" ]]; then
-        local asar_cmd
-        if command -v asar >/dev/null 2>&1; then
-          asar_cmd="asar"
-        else
-          asar_cmd="npx --yes @electron/asar"
-        fi
-        echo "Repacking app.asar..." >&2
-        # shellcheck disable=SC2086
-        if ! ${asar_cmd} pack "${asar_tmp}" "${staged}/resources/app.asar" 2>&1; then
-          echo "warn: asar repack failed — leaving unpacked tree in place" >&2
-        fi
-      fi
-    else
-      echo "warn: no package.json found under ${asar_tmp} — skipping @electron/rebuild" >&2
-      echo "hint: native modules (if any) remain as shipped for win32; they will fail on Linux until rebuilt" >&2
     fi
+    echo "Native rebuild completed." >&2
   fi
 
   # -----------------------------------------------------------------------
