@@ -13,6 +13,16 @@ name: Auto Update
         required: false
         default: ""
         type: string
+  pull_request:
+    # Smoke-build gate: a change to the porting or detection logic must prove
+    # itself against the real installer before merge. Path-filtered so
+    # docs/VERSION/README changes don't trigger a ~250 MB download + native
+    # rebuild. The release job is separately gated against pull_request below,
+    # so a PR can never publish.
+    paths:
+      - "scripts/port.sh"
+      - "scripts/detect-version.sh"
+      - ".github/workflows/auto-update.yml"
 
 # Least-privilege default; release job elevates contents to write via
 # permissions block.  Top-level permissions are the fallback for any job
@@ -67,14 +77,20 @@ jobs:
   # build — produce Linux artefacts for the detected version
   #
   # Runs port.sh <version> which downloads the win32 NSIS installer, extracts
-  # it wine-less (7z x app-64.7z), fuses the payload with Electron 42.1.0
-  # linux-x64, rebuilds the six native modules via @electron/rebuild, fixes
-  # chrome-sandbox permissions, and emits tar.gz (+ deb/AppImage best-effort).
-  # Arch matrix is present so arm64 can be enabled by expanding `arch`.
+  # it wine-less (7z x; the app-64.7z payload is located recursively — current
+  # installers nest it under $PLUGINSDIR/), fuses the payload with Electron
+  # 42.1.0 linux-x64, rebuilds the six native modules via @electron/rebuild,
+  # fixes chrome-sandbox permissions, and emits tar.gz (+ deb/AppImage
+  # best-effort). Arch matrix is present so arm64 can be enabled by expanding
+  # `arch`.
   # -----------------------------------------------------------------------
   build:
     needs: detect-version
-    if: needs.detect-version.outputs.is_new == 'true'
+    # Two entry points: (a) production — a newer version was detected, build
+    # it; (b) pull_request — smoke-build the pinned VERSION to prove the
+    # porting path still works. On (b) with no new version, detect-version
+    # returns the base VERSION and this builds that.
+    if: needs.detect-version.outputs.is_new == 'true' || github.event_name == 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -162,7 +178,9 @@ jobs:
   # -----------------------------------------------------------------------
   release:
     needs: [detect-version, build]
-    if: needs.detect-version.outputs.is_new == 'true'
+    # Never from a PR: smoke builds are verification only, and a pull_request
+    # must not publish a release, bump VERSION, or push a tag.
+    if: needs.detect-version.outputs.is_new == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -201,7 +219,7 @@ jobs:
           body: |
             Linux port of Grok Bot `${{ needs.detect-version.outputs.version }}`.
 
-            Built from the official Windows distribution via wine-less extraction (`7z x app-64.7z`) fused with Electron 42.1.0 (linux-x64), with native modules rebuilt via `@electron/rebuild`.
+            Built from the official Windows distribution via wine-less extraction (`7z x`, recursive `app-64.7z` locate) fused with Electron 42.1.0 (linux-x64), with native modules rebuilt via `@electron/rebuild`.
 
             **Install**
 
