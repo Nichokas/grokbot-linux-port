@@ -18,10 +18,16 @@ name: Auto Update
     # itself against the real installer before merge. Path-filtered so
     # docs/VERSION/README changes don't trigger a ~250 MB download + native
     # rebuild. The release job is separately gated against pull_request below,
-    # so a PR can never publish.
+    # so a PR can never publish. update-aur.sh is intentionally excluded here:
+    # it only runs inside the release job, so a PR smoke-build cannot exercise
+    # it — listing it would give false confidence that the AUR bump path was
+    # tested. aur/** is intentionally included so AUR-only PRs still trigger
+    # aur-lint; the build job's need_build gate skips the heavy download for
+    # those PRs (see build.steps[0]).
     paths:
       - "scripts/port.sh"
       - "scripts/detect-version.sh"
+      - "aur/**"
       - ".github/workflows/auto-update.yml"
 
 # Least-privilege default; release job elevates contents to write via
@@ -105,17 +111,43 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Check if build is needed (skip AUR-only PRs)
+        id: need_build
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # On PR, skip heavy build when only aur/ or docs changed
+          base="origin/${{ github.base_ref }}"
+          git fetch --depth=1 origin "${{ github.base_ref }}" 2>/dev/null || true
+          changed="$(git diff --name-only "$base"...HEAD 2>/dev/null || git diff --name-only HEAD~1 2>/dev/null || echo 'scripts/port.sh')"
+          echo "Changed files:"
+          echo "$changed"
+          if echo "$changed" | grep -qvE '^(aur/|README\.md$|VERSION$)' && echo "$changed" | grep -qE '^(scripts/(port\.sh|detect-version\.sh)|\.github/workflows/auto-update\.yml)'; then
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          elif echo "$changed" | grep -qE '^(scripts/(port\.sh|detect-version\.sh)|\.github/workflows/auto-update\.yml)'; then
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "AUR/docs-only PR — skipping heavy Linux port build (aur-lint still runs)"
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up Node.js 22
+        if: steps.need_build.outputs.needed == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: "22"
 
       - name: Set up Bun
+        if: steps.need_build.outputs.needed == 'true'
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
       - name: Cache Electron binary
+        if: steps.need_build.outputs.needed == 'true'
         uses: actions/cache@v4
         with:
           path: ~/.cache/electron
@@ -125,6 +157,7 @@ jobs:
             electron-42.1.0-
 
       - name: Install system dependencies
+        if: steps.need_build.outputs.needed == 'true'
         run: |
           set -euo pipefail
           sudo apt-get update -qq
@@ -135,6 +168,7 @@ jobs:
             p7zip-full unzip squashfs-tools build-essential python3
 
       - name: Install Node dependencies (rebuild tooling)
+        if: steps.need_build.outputs.needed == 'true'
         run: |
           set -euo pipefail
           # No lockfile needed — tools are invoked via bunx/npx at build time.
@@ -148,6 +182,7 @@ jobs:
           fi
 
       - name: Build Linux port for ${{ needs.detect-version.outputs.version }}
+        if: steps.need_build.outputs.needed == 'true'
         env:
           GROK_VERSION: ${{ needs.detect-version.outputs.version }}
           ELECTRON_VERSION: "42.1.0"
@@ -159,6 +194,7 @@ jobs:
           ls -lh dist/ || true
 
       - name: Upload build artefacts
+        if: steps.need_build.outputs.needed == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: grokbot-linux-${{ needs.detect-version.outputs.version }}-${{ matrix.arch }}
@@ -167,6 +203,55 @@ jobs:
             dist/*.AppImage
           if-no-files-found: error
           retention-days: 7
+
+  # -----------------------------------------------------------------------
+  # aur-lint — validate AUR PKGBUILDs on PRs touching aur/
+  #
+  # Lightweight gate so an AUR-only PR with a broken PKGBUILD does not get
+  # a green check from the unrelated Linux smoke build. Uses namcap when
+  # available, else falls back to `bash -n` + `makepkg --printsrcinfo` checks.
+  # Only runs on pull_request to avoid duplicate work on scheduled/dispatch.
+  # -----------------------------------------------------------------------
+  aur-lint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Lint AUR PKGBUILDs
+        run: |
+          set -euo pipefail
+          # makepkg refuses to run as root; archlinux:base-devel defaults to root.
+          # Create an unprivileged build user for srcinfo checks.
+          if ! id -u builder >/dev/null 2>&1; then
+            useradd -m builder 2>/dev/null || true
+          fi
+          chown -R builder:builder aur 2>/dev/null || true
+          run_as_builder() { runuser -u builder -- bash -c "$1"; }
+          failed=0
+          for dir in aur/grokbot-linux-port aur/grokbot-linux-port-bin; do
+            echo "==> Checking ${dir}/PKGBUILD"
+            if [[ ! -f "${dir}/PKGBUILD" ]]; then
+              echo "  skip (no PKGBUILD)"
+              continue
+            fi
+            bash -n "${dir}/PKGBUILD" || { echo "  FAIL: bash -n"; failed=1; continue; }
+            if command -v makepkg >/dev/null 2>&1; then
+              run_as_builder "cd \"${dir}\" && makepkg --printsrcinfo >/dev/null" || { echo "  FAIL: makepkg --printsrcinfo"; failed=1; continue; }
+              run_as_builder "cd \"${dir}\" && diff -u .SRCINFO <(makepkg --printsrcinfo)" || { echo "  FAIL: .SRCINFO out of date — run scripts/update-aur.sh or makepkg --printsrcinfo"; failed=1; }
+            else
+              echo "  FAIL: makepkg not found in archlinux:base-devel image — runner misconfigured" >&2
+              failed=1
+            fi
+            if command -v namcap >/dev/null 2>&1; then
+              namcap "${dir}/PKGBUILD" || echo "  (namcap warnings — non-fatal)"
+            fi
+          done
+          exit "${failed}" 
 
   # -----------------------------------------------------------------------
   # release — publish GitHub Release, upload artefacts, bump VERSION
@@ -257,13 +342,36 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Commit only if VERSION actually changed — avoids empty commits on
-          # re-runs where the tag already existed but is_new was true.
-          if git diff --quiet -- VERSION; then
-            echo "VERSION unchanged — skipping commit."
+          git add VERSION
+          # Also bump AUR packages in the same commit when applicable.
+          # PKGBUILD pkgver/sha256sums are always updated; .SRCINFO is only
+          # regenerated when makepkg is available (Arch). On Ubuntu runners
+          # the .SRCINFO stays stale on purpose — the release commit carries
+          # the correct PKGBUILD, and README documents that .SRCINFO must be
+          # regenerated on Arch before pushing to aur.archlinux.org.
+          if [[ -d aur/grokbot-linux-port && -d aur/grokbot-linux-port-bin ]]; then
+            echo "Bumping AUR packages to ${DETECTED_VERSION}..."
+            bash scripts/update-aur.sh "${DETECTED_VERSION}" || echo "warn: update-aur.sh failed — VERSION will still be pushed" >&2
+            # Stage PKGBUILDs unconditionally; .SRCINFO only if it was actually regenerated (newer than PKGBUILD).
+            staged_pkgs=()
+            for pkg in grokbot-linux-port grokbot-linux-port-bin; do
+              git add "aur/${pkg}/PKGBUILD" 2>/dev/null || true
+              if [[ "aur/${pkg}/.SRCINFO" -nt "aur/${pkg}/PKGBUILD" ]]; then
+                git add "aur/${pkg}/.SRCINFO" 2>/dev/null || true
+              else
+                echo "note: aur/${pkg}/.SRCINFO not regenerated (makepkg unavailable) — staging PKGBUILD only" >&2
+              fi
+            done
+          fi
+          if git diff --cached --quiet; then
+            echo "Nothing to commit (VERSION and AUR already up to date)."
             exit 0
           fi
-
-          git add VERSION
-          git commit -m "chore: bump VERSION to ${DETECTED_VERSION}"
+          if git diff --cached --name-only | grep -q "^aur/" && git diff --cached --name-only | grep -q "^VERSION"; then
+            git commit -m "chore: bump VERSION to ${DETECTED_VERSION} (aur ${DETECTED_VERSION})"
+          elif git diff --cached --name-only | grep -q "^aur/"; then
+            git commit -m "chore(aur): bump to ${DETECTED_VERSION}"
+          else
+            git commit -m "chore: bump VERSION to ${DETECTED_VERSION}"
+          fi
           git push origin HEAD:${{ github.ref_name || 'main' }}

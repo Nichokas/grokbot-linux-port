@@ -282,12 +282,21 @@ main() {
   for f in "${electron_dir}/chrome-sandbox" "${electron_dir}/chrome_crashpad_handler" \
            "${electron_dir}/libEGL.so" "${electron_dir}/libGLESv2.so" \
            "${electron_dir}/libffmpeg.so" "${electron_dir}/libvk_swiftshader.so" \
+           "${electron_dir}/libvulkan.so.1" \
            "${electron_dir}/vk_swiftshader_icd.json"; do
     [[ -f "${f}" ]] && cp "${f}" "${staged}/"
   done
   # Preserve executable bits for sandbox/crash handler
   [[ -f "${staged}/chrome-sandbox" ]] && chmod 4755 "${staged}/chrome-sandbox" 2>/dev/null || true
   [[ -f "${staged}/chrome_crashpad_handler" ]] && chmod +x "${staged}/chrome_crashpad_handler" || true
+
+  # Chromium runtime data required before ICU init — missing any of these
+  # triggers "Invalid file descriptor to ICU data received" / SIGTRAP.
+  for f in "${electron_dir}/icudtl.dat" \
+           "${electron_dir}/snapshot_blob.bin" \
+           "${electron_dir}/v8_context_snapshot.bin"; do
+    [[ -f "${f}" ]] && cp "${f}" "${staged}/"
+  done
 
   # Top-level locales and .pak files (required for startup)
   if [[ -d "${electron_dir}/locales" ]]; then
@@ -298,6 +307,9 @@ main() {
   done
   for so in "${electron_dir}"/*.so; do
     [[ -f "${so}" ]] && cp "${so}" "${staged}/" 2>/dev/null || true
+  done
+  for so1 in "${electron_dir}"/*.so.1; do
+    [[ -f "${so1}" ]] && cp "${so1}" "${staged}/" 2>/dev/null || true
   done
 
   # Application resources — overwrite Electron's default app.asar if present

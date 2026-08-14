@@ -169,6 +169,83 @@ Only `x64` is built in CI; `arm64` can be enabled by expanding the `arch` matrix
 - `@electron/rebuild` fails — the six native modules have not been rebuilt for Linux; the tarball is still produced but native functionality (SQLite, tree-sitter, etc.) will malfunction until rebuilt.  Re-run manually: `npx @electron/rebuild --version 42.1.0`.
 - `chrome-sandbox` permission denied — run the `chown`/`chmod` command above, or launch with `--no-sandbox` (reduces isolation).
 
+## AUR
+
+Dos paquetes en el AUR (mismo upstream, distinta política de distribución):
+
+| Paquete | Tipo | Qué descarga en build |
+|---------|------|-----------------------|
+| [`grokbot-linux-port`](https://aur.archlinux.org/packages/grokbot-linux-port) | source build (`makepkg`) | El tarball fuente de este repo (`archive/v<ver>.tar.gz`) y construye localmente vía `scripts/port.sh` (descarga el `Setup.exe` win32 + Electron 42.1.0, extrae con `7z`, fusiona y hace `@electron/rebuild`). |
+| [`grokbot-linux-port-bin`](https://aur.archlinux.org/packages/grokbot-linux-port-bin) | binario precompilado | El `Grok_Bot_<ver>_linux_x64.tar.gz` ya publicado en [Releases](https://github.com/Nichokas/grokbot-linux-port/releases). Sin compilación. |
+
+Ambos instalan `/opt/grokbot-linux-port*/grok-bot`, symlinks `grok-bot`/`grokbot` en `/usr/bin`, `.desktop` y icono. Se proveen mutuamente vía `provides`/`conflicts` — instala uno u otro.
+
+### Instalar
+
+```bash
+# Binario (rápido, recomendado)
+yay -S grokbot-linux-port-bin
+# o
+paru -S grokbot-linux-port-bin
+
+# Desde fuente (requiere p7zip, curl, unzip, nodejs, npm, python, git; compila 6 módulos nativos)
+yay -S grokbot-linux-port
+```
+
+Manual con `makepkg`:
+
+```bash
+git clone https://github.com/Nichokas/grokbot-linux-port.git
+cd grokbot-linux-port
+
+# -bin (precompilado)
+cd aur/grokbot-linux-port-bin && makepkg -si
+
+# source build
+cd ../grokbot-linux-port && makepkg -si
+```
+
+### Publicar / actualizar en el AUR (mantenedor)
+
+Requiere cuenta en https://aur.archlinux.org, clave SSH registrada y `ssh aur@aur.archlinux.org`.
+
+Setup inicial (una vez por paquete, ya hecho para ambos si `aur/<pkg>/.git` existe):
+
+```bash
+# grokbot-linux-port (source)
+git clone ssh://aur@aur.archlinux.org/grokbot-linux-port.git /tmp/aur-grokbot-linux-port
+cp -a aur/grokbot-linux-port/{PKGBUILD,.SRCINFO} /tmp/aur-grokbot-linux-port/
+git -C /tmp/aur-grokbot-linux-port add PKGBUILD .SRCINFO
+git -C /tmp/aur-grokbot-linux-port commit -m "upgpkg: 0.20.0-1" && git -C /tmp/aur-grokbot-linux-port push
+
+# grokbot-linux-port-bin (binario)
+git clone ssh://aur@aur.archlinux.org/grokbot-linux-port-bin.git /tmp/aur-grokbot-linux-port-bin
+cp -a aur/grokbot-linux-port-bin/{PKGBUILD,.SRCINFO} /tmp/aur-grokbot-linux-port-bin/
+git -C /tmp/aur-grokbot-linux-port-bin add PKGBUILD .SRCINFO
+git -C /tmp/aur-grokbot-linux-port-bin commit -m "upgpkg: 0.20.0-1" && git -C /tmp/aur-grokbot-linux-port-bin push
+```
+
+Actualización en cada release (automatizable):
+
+```bash
+# Tras publicar vX.Y.Z en GitHub (el workflow ya crea el tag y el tarball):
+scripts/update-aur.sh X.Y.Z          # recalcula sha256sums y regenera .SRCINFO
+git diff aur/                        # revisar
+git add aur/ && git commit -m "chore(aur): bump to X.Y.Z"
+
+# Empujar a cada repo AUR
+for pkg in grokbot-linux-port grokbot-linux-port-bin; do
+  rm -rf /tmp/aur-$pkg
+  git clone ssh://aur@aur.archlinux.org/$pkg.git /tmp/aur-$pkg
+  cp -a aur/$pkg/{PKGBUILD,.SRCINFO} /tmp/aur-$pkg/
+  git -C /tmp/aur-$pkg add PKGBUILD .SRCINFO
+  git -C /tmp/aur-$pkg commit -m "upgpkg: X.Y.Z-1" || true
+  git -C /tmp/aur-$pkg push
+done
+```
+
+El workflow `auto-update.yml` ya hace el bump de `aur/*/PKGBUILD`+`.SRCINFO` en el mismo commit que `VERSION` tras cada `release` (vía `scripts/update-aur.sh`; en Ubuntu sin `makepkg` el `.SRCINFO` se actualiza con un fallback en Python que replica `pkgver`/`source`/`sha256sums`, quedando canónico tras el siguiente `makepkg --printsrcinfo` en Arch). El push a `aur.archlinux.org` queda manual a propósito (sin secretos SSH en Actions).
+
 ## Licence and provenance
 
 This repository contains no upstream Grok Bot binaries.  Artefacts are derived at build time from the official Windows distribution.  Grok Bot and Electron are the property of their respective owners.

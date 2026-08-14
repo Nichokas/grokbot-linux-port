@@ -5,13 +5,24 @@ yarn-debug.log*
 yarn-error.log*
 package-lock.json
 
-# Build outputs
+# Build outputs (repo root only — AUR .SRCINFO is tracked, but built packages inside aur/ are still ignored)
 dist/
 out/
-*.tar.gz
-*.deb
-*.AppImage
-electron-v*.zip
+/*.tar.gz
+/*.deb
+/*.AppImage
+/*.pkg.tar.*
+/electron-v*.zip
+aur/**/*.pkg.tar.*
+aur/**/*.pkg.tar.zst
+aur/**/src/
+aur/**/pkg/
+# makepkg stores downloaded URL sources alongside the PKGBUILD when SRCDEST
+# is unset — ignore those AUR source tarballs (names are per-PKGBUILD `source`)
+aur/**/*.tar.gz
+aur/**/*.tar.xz
+aur/**/*.tar.zst
+aur/**/*.zip
 
 # Temp / workdirs
 tmp/
