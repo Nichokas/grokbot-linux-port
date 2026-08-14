@@ -72,11 +72,16 @@ probe_version() {
   if probe_url "${win32_url}"; then
     return 0
   fi
-  # Optional cross-platform confirmation — darwin artifact occasionally
-  # appears first; probing it prevents false negatives on win32 propagation
-  # lag. Failure on both platforms is treated as non-existence.
+  # darwin is informational only. port.sh downloads the win32 installer
+  # exclusively, so a darwin-200/win32-404 combination would previously mark
+  # the version as existing and then fail the build on the win32 fetch.
+  # Report the mismatch so the scheduled run retries on the next cron tick
+  # instead of burning a build job on a version it cannot download.
   darwin_url="$(printf "${DARWIN_URL_TEMPLATE}" "${ver}" "${ver}")"
-  probe_url "${darwin_url}"
+  if probe_url "${darwin_url}"; then
+    echo "  note: ${ver} exists on darwin but not win32 yet — treating as unavailable (win32 propagation lag)" >&2
+  fi
+  return 1
 }
 
 # ---------------------------------------------------------------------------

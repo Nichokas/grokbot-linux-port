@@ -28,6 +28,25 @@ package() {
     exit 1
   fi
 
+  # Upstream tarball ships NSIS-derived restrictive modes (drwx------ on
+  # app.asar.unpacked); cp -a would preserve them and pacman would then
+  # install root-only directories. Normalise before copying.
+  chmod -R u+rwX,go+rX,go-w "${staged}"
+
+  # Refuse to package a tarball whose native modules are still Windows PE
+  # binaries — they dlopen-fail at runtime with "invalid ELF header".
+  if [[ "${GROKBOT_ALLOW_BROKEN_NATIVE:-}" != "1" ]]; then
+    local mz_hits
+    mz_hits="$(find "${staged}" -name '*.node' -type f -exec sh -c \
+      'head -c 2 "$1" | grep -q MZ && echo x' _ {} \; 2>/dev/null | wc -l)"
+    if [[ "${mz_hits}" -gt 0 ]]; then
+      echo "error: ${mz_hits} .node files in the tarball are win32 (MZ header) — upstream rebuild failed" >&2
+      echo "hint:  install grokbot-linux-port (builds from source) instead, or rebuild upstream via scripts/port.sh" >&2
+      echo "hint:  GROKBOT_ALLOW_BROKEN_NATIVE=1 makepkg -si forces a known-broken install (debug only)" >&2
+      exit 1
+    fi
+  fi
+
   install -dm755 "${pkgdir}/opt/${pkgname}" "${pkgdir}/usr/bin" \
                  "${pkgdir}/usr/share/applications" \
                  "${pkgdir}/usr/share/icons/hicolor/256x256/apps" \

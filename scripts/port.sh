@@ -207,7 +207,15 @@ main() {
     find . -maxdepth 3 | sort >&2
     exit 1
   fi
-  echo "Found embedded archive: ${app_archive}" >&2
+  # 7z x on NSIS can exit 0 with warnings while leaving a truncated payload.
+  # Validate the 7z magic (37 7A BC AF 27 1C) before trusting the archive —
+  # a corrupt app-64.7z would otherwise fail later with a far less clear error.
+  if [[ "$(head -c 6 "${app_archive}" | od -An -tx1 | tr -d ' \n')" != "377abcaf271c" ]]; then
+    echo "error: ${app_archive} does not have a valid 7z header — NSIS extraction likely truncated" >&2
+    echo "hint: re-run; if persistent, the upstream installer layout changed and the locate logic needs updating" >&2
+    exit 1
+  fi
+  echo "Found embedded archive: ${app_archive} (7z magic OK)" >&2
 
   local app_dir="${workdir}/app-extracted"
   mkdir -p "${app_dir}"
@@ -330,6 +338,22 @@ main() {
   echo "Staged Linux app at ${staged}" >&2
   du -sh "${staged}" >&2
 
+  # NSIS payload preserves restrictive modes (drwx------ on app.asar.unpacked,
+  # etc.). tar -czf would propagate them into the artefact and a non-root
+  # consumer (e.g. the AUR -bin package after pacman installs as root) would
+  # then ship a directory only root can read. Normalise before packaging —
+  # dirs 755, files 644 — then restore the exec/setuid bits the blanket 644
+  # just stripped. Order matters: normalise first, fix exec bits second.
+  find "${staged}" -type d -exec chmod 755 {} +
+  find "${staged}" -type f -exec chmod 644 {} +
+  chmod 755 "${staged}/grok-bot"
+  [[ -f "${staged}/chrome-sandbox" ]] && chmod 4755 "${staged}/chrome-sandbox"
+  [[ -f "${staged}/chrome_crashpad_handler" ]] && chmod 755 "${staged}/chrome_crashpad_handler"
+  # .node shared objects are dlopen()ed, not exec()ed, but several loaders
+  # (and some dlopen hardening paths) expect them readable+executable; the
+  # Electron-distributed .so files keep their upstream +x for the same reason.
+  find "${staged}" -type f \( -name "*.node" -o -name "*.so" -o -name "*.so.*" \) -exec chmod 755 {} +
+
   # -----------------------------------------------------------------------
   # 6. Rebuild native modules against Electron 42.1.0
   #
@@ -387,11 +411,41 @@ main() {
       echo "Running @electron/rebuild for Electron ${ELECTRON_VERSION} in ${rebuild_root}" >&2
       echo "Target modules: ${NATIVE_MODULES[*]}" >&2
       # Use npx with --yes to avoid interactive prompts in CI
+      # Rebuild is a hard requirement for a Linux artefact — warn-and-continue
+      # ships a tarball full of PE32 .node that dies on dlopen with
+      # "invalid ELF header". If it must be bypassed for debugging, export
+      # GROKBOT_ALLOW_BROKEN_NATIVE=1 explicitly (the AUR -src PKGBUILD also
+      # honours that knob).
       if ! (cd "${rebuild_root}" && npx --yes @electron/rebuild --version "${ELECTRON_VERSION}" 2>&1); then
-        echo "warn: @electron/rebuild exited non-zero — native modules may require manual rebuild" >&2
-        echo "hint: cd ${rebuild_root} && npx @electron/rebuild --version ${ELECTRON_VERSION}" >&2
+        if [[ "${GROKBOT_ALLOW_BROKEN_NATIVE:-}" == "1" ]]; then
+          echo "warn: @electron/rebuild exited non-zero but GROKBOT_ALLOW_BROKEN_NATIVE=1 — continuing" >&2
+        else
+          echo "error: @electron/rebuild failed — native modules remain Windows-built and the resulting tarball will not start" >&2
+          echo "hint:  cd ${rebuild_root} && npx @electron/rebuild --version ${ELECTRON_VERSION}" >&2
+          echo "hint:  re-run with GROKBOT_ALLOW_BROKEN_NATIVE=1 to force a known-broken artefact (debug only)" >&2
+          exit 1
+        fi
       else
         echo "Native rebuild completed." >&2
+      fi
+
+      # Verify the rebuild actually produced Linux .node files. port.sh's
+      # earlier logic could succeed while @electron/rebuild silently did
+      # nothing (e.g. package.json found but module list empty). Detect PE/MZ
+      # headers per file — any MZ magic in a .node means a win32 binary
+      # slipped through.
+      local mz_hits
+      mz_hits="$(find "${staged}/resources/app.asar.unpacked" -name "*.node" -type f -exec sh -c \
+        'head -c 2 "$1" | grep -q MZ && echo x' _ {} \; 2>/dev/null | wc -l)"
+      if [[ "${mz_hits}" != "0" && -n "${mz_hits}" ]]; then
+        if [[ "${GROKBOT_ALLOW_BROKEN_NATIVE:-}" == "1" ]]; then
+          echo "warn: ${mz_hits} win32 .node binaries still present after rebuild — GROKBOT_ALLOW_BROKEN_NATIVE=1 override active" >&2
+        else
+          echo "error: ${mz_hits} .node files still carry MZ header after rebuild — @electron/rebuild did not replace them" >&2
+          find "${staged}/resources/app.asar.unpacked" -name "*.node" -type f -exec sh -c 'head -c 2 "$1" | grep -q MZ && echo "  $1"' _ {} \; 2>/dev/null | head -n 20 >&2
+          echo "hint:  fix the rebuild toolchain (python3, make, g++, @electron/rebuild deps) or set GROKBOT_ALLOW_BROKEN_NATIVE=1" >&2
+          exit 1
+        fi
       fi
 
       # Repack if we unpacked

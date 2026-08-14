@@ -78,6 +78,11 @@ package() {
     exit 1
   fi
 
+  # Tarballs produced by older port.sh kept NSIS restrictive modes
+  # (drwx------ on app.asar.unpacked). cp -a preserves them; normalise so the
+  # installed tree is readable by the invoking user, not only root.
+  chmod -R u+rwX,go+rX,go-w "${staged}"
+
   install -dm755 "${pkgdir}/opt/${pkgname}" "${pkgdir}/usr/bin" \
                  "${pkgdir}/usr/share/applications" \
                  "${pkgdir}/usr/share/icons/hicolor/256x256/apps" \
