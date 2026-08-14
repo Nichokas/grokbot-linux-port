@@ -1,4 +1,4 @@
-# Grok Bot — Linux Port
+# Grok Bot Linux Port
 
 Port de [Grok Bot](https://downloads.cursor.com/grokbot/stable/win32-x64/) (la app oficial de escritorio de Grok) para Linux, sin Wine. Se construye fusionando el instalador de Windows (NSIS) con el binario oficial de Electron 42.1.0 para Linux y recompilando los módulos nativos.
 
