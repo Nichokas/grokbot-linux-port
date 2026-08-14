@@ -476,12 +476,12 @@ jobs:
           VER: ${{ needs.release.outputs.version }}
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
           for pkg in grokbot-linux-port grokbot-linux-port-bin; do
             echo "::group::Publish ${pkg}"
             tmp="$(mktemp -d)"
             git clone "ssh://aur@aur.archlinux.org/${pkg}.git" "${tmp}/${pkg}"
+            git -C "${tmp}/${pkg}" config user.name "github-actions[bot]"
+            git -C "${tmp}/${pkg}" config user.email "github-actions[bot]@users.noreply.github.com"
             cp "aur/${pkg}/PKGBUILD" "aur/${pkg}/.SRCINFO" "${tmp}/${pkg}/"
             git -C "${tmp}/${pkg}" add PKGBUILD .SRCINFO
             if git -C "${tmp}/${pkg}" diff --cached --quiet; then
