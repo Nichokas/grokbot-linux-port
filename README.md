@@ -1,16 +1,16 @@
 # Grok Bot Linux Port
 
-Port de [Grok Bot](https://downloads.cursor.com/grokbot/stable/win32-x64/) (la app oficial de escritorio de Grok) para Linux, sin Wine. Se construye fusionando el instalador de Windows (NSIS) con el binario oficial de Electron 42.1.0 para Linux y recompilando los módulos nativos.
+Port of [Grok Bot](https://downloads.cursor.com/grokbot/stable/win32-x64/) (the official Grok desktop app) for Linux, without Wine. Built by merging the Windows installer (NSIS) with the official Electron 42.1.0 binary for Linux and recompiling the native modules.
 
-Existe porque no hay build oficial para Linux.
+It exists because there is no official Linux build.
 
-## Instalar
+## Install
 
 **Arch (AUR):**
 
 ```bash
-yay -S grokbot-linux-port-bin   # binario precompilado, recomendado
-yay -S grokbot-linux-port       # desde fuente (compila 6 módulos nativos)
+yay -S grokbot-linux-port-bin   # precompiled binary, recommended
+yay -S grokbot-linux-port       # from source (compiles 6 native modules)
 ```
 
 **Fedora (COPR): WIP!!**
@@ -20,39 +20,39 @@ sudo dnf copr enable nichokas/grokbot-linux-port
 sudo dnf install grokbot-linux-port
 ```
 
-**Tarball (cualquier distro):** descarga `Grok_Bot_<ver>_linux_x64.tar.gz` de [Releases](https://github.com/Nichokas/grokbot-linux-port/releases) y:
+**Tarball (any distro):** download `Grok_Bot_<ver>_linux_x64.tar.gz` from [Releases](https://github.com/Nichokas/grokbot-linux-port/releases) and:
 
 ```bash
 tar -xzf Grok_Bot_*_linux_x64.tar.gz && cd Grok_Bot_*_linux_x64
 sudo chown root:root chrome-sandbox && sudo chmod 4755 chrome-sandbox
-./grok-bot          # o ./grok-bot --no-sandbox
+./grok-bot          # or ./grok-bot --no-sandbox
 ```
 
-## Versiones
+## Versions
 
-| Componente | Versión |
-|------------|---------|
-| Grok Bot | [`VERSION`](./VERSION) (0.20.0) |
-| Electron | 42.1.0 |
+| Component | Version |
+|-----------|---------|
+| Grok Bot  | [`VERSION`](./VERSION) (0.20.0) |
+| Electron  | 42.1.0 |
 
-## Cómo funciona
+## How it works
 
-1. **Detección** (`scripts/detect-version.sh`): upstream no expone listado ni `latest.yml`, así que se hace HEAD-probing de candidatos semver (parches, minors, major) contra `downloads.cursor.com`. El mayor que responde `200` y supera a `VERSION` dispara un build.
-2. **Port** (`scripts/port.sh`): descarga el `Setup.exe`, lo extrae con `7z` (sin Wine), descarga Electron 42.1.0 Linux, fusiona `app.asar`, recompila los 6 módulos nativos (`better-sqlite3`, `tree-sitter`, etc.) con `@electron/rebuild`, fija `chrome-sandbox` a `4755` y emite el tarball a `dist/`.
-3. **CI** (`.github/workflows/auto-update.yml`): diario a las `37 6 * * *` UTC. Si hay versión nueva: build → GitHub Release `v<ver>` → bump de `VERSION` y de los PKGBUILD del AUR → push a `aur.archlinux.org`. Lanzar el workflow a mano con la versión actual (`-f version=$(cat VERSION)`) fuerza un *rebuild*: re-sube los artefactos a la release existente y resincroniza el `sha256sums` del paquete `-bin` con bump de `pkgrel`, sin tocar `VERSION`.
+1. **Detection** (`scripts/detect-version.sh`): upstream doesn't expose a listing or `latest.yml`, so it does HEAD-probing of semver candidates (patches, minors, majors) against `downloads.cursor.com`. The highest one that returns `200` and is newer than `VERSION` triggers a build.
+2. **Port** (`scripts/port.sh`): downloads the `Setup.exe`, extracts it with `7z` (without Wine), downloads Electron 42.1.0 for Linux, merges `app.asar`, recompiles the 6 native modules (`better-sqlite3`, `tree-sitter`, etc.) with `@electron/rebuild`, sets `chrome-sandbox` to `4755` and outputs the tarball to `dist/`.
+3. **CI** (`.github/workflows/auto-update.yml`): daily at `37 6 * * *` UTC. If there's a new version: build → GitHub Release `v<ver>` => bump `VERSION` and the AUR PKGBUILDs => push to `aur.archlinux.org`. Triggering the workflow manually with the current version (`-f version=$(cat VERSION)`) forces a *rebuild*: it re-uploads the artifacts to the existing release and re-syncs the `sha256sums` of the `-bin` package with a `pkgrel` bump, without touching `VERSION`.
 
-Build manual de una versión concreta:
+Manual build of a specific version:
 
 ```bash
-gh workflow run auto-update.yml -f version=0.20.0   # en GitHub
-scripts/port.sh 0.20.0                               # en local (requiere p7zip, curl, unzip, node 22, python3)
+gh workflow run auto-update.yml -f version=0.20.0   # on GitHub
+scripts/port.sh 0.20.0                               # locally (requires p7zip, curl, unzip, node 22, python3)
 ```
 
-## Mantenimiento AUR
+## AUR Maintenance
 
-El CI actualiza `aur/*/PKGBUILD` + `.SRCINFO` en cada release y los publica en `aur.archlinux.org` automáticamente (job `aur-publish`, con la clave del secreto `AUR_SSH_PRIVATE_KEY`). El checksum del tarball `-bin` se calcula sobre los bytes exactos que sube el job `release` (`--bin-sum`), no re-descargando la URL publicada: el CDN de GitHub puede seguir sirviendo el asset anterior durante la propagación, que es como se publicaron checksums obsoletos en 0.20.0.
+CI updates `aur/*/PKGBUILD` + `.SRCINFO` on every release and publishes them to `aur.archlinux.org` automatically (`aur-publish` job, with the key from the `AUR_SSH_PRIVATE_KEY` secret). The `-bin` tarball checksum is computed over the exact bytes uploaded by the `release` job (`--bin-sum`), not by re-downloading the published URL: GitHub's CDN can keep serving the previous asset during propagation, which is how stale checksums were published in 0.20.0.
 
-Push manual (solo si el job `aur-publish` falla):
+Manual push (only if the `aur-publish` job fails):
 
 ```bash
 for pkg in grokbot-linux-port grokbot-linux-port-bin; do
@@ -67,10 +67,10 @@ done
 
 ## Troubleshooting
 
-- `7z: command not found` → instala `p7zip-full`.
-- `chrome-sandbox` permission denied → el `chown`/`chmod` de arriba, o lanza con `--no-sandbox`.
-- `@electron/rebuild` falla → el tarball igualmente se genera; reintenta con `npx @electron/rebuild --version 42.1.0`.
+- `7z: command not found` => install `p7zip-full`.
+- `chrome-sandbox` permission denied => run the `chown`/`chmod` above, or launch with `--no-sandbox`.
+- `@electron/rebuild` fails => the tarball is still generated; retry with `npx @electron/rebuild --version 42.1.0`.
 
-## Licencia
+## License
 
-Este repo no contiene binarios de Grok Bot; los artefactos se derivan en build time de la distribución oficial de Windows. Grok Bot y Electron pertenecen a sus respectivos propietarios.
+This repo does not contain Grok Bot binaries; artifacts are derived at build time from the official Windows distribution. Grok Bot and Electron belong to their respective owners.
