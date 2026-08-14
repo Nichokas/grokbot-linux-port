@@ -39,7 +39,7 @@ sudo chown root:root chrome-sandbox && sudo chmod 4755 chrome-sandbox
 
 1. **Detección** (`scripts/detect-version.sh`): upstream no expone listado ni `latest.yml`, así que se hace HEAD-probing de candidatos semver (parches, minors, major) contra `downloads.cursor.com`. El mayor que responde `200` y supera a `VERSION` dispara un build.
 2. **Port** (`scripts/port.sh`): descarga el `Setup.exe`, lo extrae con `7z` (sin Wine), descarga Electron 42.1.0 Linux, fusiona `app.asar`, recompila los 6 módulos nativos (`better-sqlite3`, `tree-sitter`, etc.) con `@electron/rebuild`, fija `chrome-sandbox` a `4755` y emite el tarball a `dist/`.
-3. **CI** (`.github/workflows/auto-update.yml`): diario a las `37 6 * * *` UTC. Si hay versión nueva: build → GitHub Release `v<ver>` → bump de `VERSION` y de los PKGBUILD del AUR.
+3. **CI** (`.github/workflows/auto-update.yml`): diario a las `37 6 * * *` UTC. Si hay versión nueva: build → GitHub Release `v<ver>` → bump de `VERSION` y de los PKGBUILD del AUR → push a `aur.archlinux.org`. Lanzar el workflow a mano con la versión actual (`-f version=$(cat VERSION)`) fuerza un *rebuild*: re-sube los artefactos a la release existente y resincroniza el `sha256sums` del paquete `-bin` con bump de `pkgrel`, sin tocar `VERSION`.
 
 Build manual de una versión concreta:
 
@@ -50,7 +50,9 @@ scripts/port.sh 0.20.0                               # en local (requiere p7zip,
 
 ## Mantenimiento AUR
 
-El CI actualiza `aur/*/PKGBUILD` + `.SRCINFO` en cada release (vía `scripts/update-aur.sh`). El push a `aur.archlinux.org` es manual a propósito (sin claves SSH en Actions):
+El CI actualiza `aur/*/PKGBUILD` + `.SRCINFO` en cada release y los publica en `aur.archlinux.org` automáticamente (job `aur-publish`, con la clave del secreto `AUR_SSH_PRIVATE_KEY`). El checksum del tarball `-bin` se calcula sobre los bytes exactos que sube el job `release` (`--bin-sum`), no re-descargando la URL publicada: el CDN de GitHub puede seguir sirviendo el asset anterior durante la propagación, que es como se publicaron checksums obsoletos en 0.20.0.
+
+Push manual (solo si el job `aur-publish` falla):
 
 ```bash
 for pkg in grokbot-linux-port grokbot-linux-port-bin; do

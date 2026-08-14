@@ -58,6 +58,7 @@ jobs:
     outputs:
       version: ${{ steps.detect.outputs.version }}
       is_new: ${{ steps.detect.outputs.is_new }}
+      rebuild: ${{ steps.detect.outputs.rebuild }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -93,10 +94,12 @@ jobs:
   build:
     needs: detect-version
     # Two entry points: (a) production — a newer version was detected, build
-    # it; (b) pull_request — smoke-build the pinned VERSION to prove the
-    # porting path still works. On (b) with no new version, detect-version
-    # returns the base VERSION and this builds that.
-    if: needs.detect-version.outputs.is_new == 'true' || github.event_name == 'pull_request'
+    # it; (a') explicit rebuild — workflow_dispatch with the current version
+    # forces a rebuild + AUR resync (port.sh fixes must reach AUR users);
+    # (b) pull_request — smoke-build the pinned VERSION to prove the porting
+    # path still works. On (b) with no new version, detect-version returns
+    # the base VERSION and this builds that.
+    if: needs.detect-version.outputs.is_new == 'true' || needs.detect-version.outputs.rebuild == 'true' || github.event_name == 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -263,11 +266,19 @@ jobs:
   release:
     needs: [detect-version, build]
     # Never from a PR: smoke builds are verification only, and a pull_request
-    # must not publish a release, bump VERSION, or push a tag.
-    if: needs.detect-version.outputs.is_new == 'true' && github.event_name != 'pull_request'
+    # must not publish a release, bump VERSION, or push a tag. rebuild=true
+    # (explicit dispatch of the current version) re-uploads artifacts to the
+    # existing release and resyncs the AUR -bin checksum, without touching
+    # VERSION or creating a new tag.
+    if: (needs.detect-version.outputs.is_new == 'true' || needs.detect-version.outputs.rebuild == 'true') && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # surfaced so aur-publish can skip runs where the aur/ tree did not move.
+    outputs:
+      version: ${{ needs.detect-version.outputs.version }}
+      tarball_sum: ${{ steps.artifacts.outputs.tarball_sum }}
+      aur_changed: ${{ steps.aur-bump.outputs.changed }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -290,16 +301,36 @@ jobs:
           ls -lh dist/ || true
           find dist -type f -exec ls -lh {} \;
 
+      - name: Hash release tarball
+        id: artifacts
+        env:
+          VER: ${{ needs.detect-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Hash the exact bytes this job will upload. update-aur.sh must not
+          # re-hash the published URL: GitHub's asset CDN races propagation of
+          # freshly uploaded assets, and a re-upload leaves the old sum behind.
+          tarball="dist/Grok_Bot_${VER}_linux_x64.tar.gz"
+          [[ -f "${tarball}" ]] || { echo "::error::expected tarball ${tarball} missing" >&2; exit 1; }
+          sum="$(sha256sum "${tarball}" | awk '{print $1}')"
+          echo "tarball_sum=${sum}" >> "${GITHUB_OUTPUT}"
+          echo "sha256(${tarball}) = ${sum}"
+
       - name: Fix chrome-sandbox permissions in tarball (post-hoc note)
         run: |
           echo "Note: chrome-sandbox inside the tarball is set to 4755 during build when running as root."
           echo "Consumers extracting as non-root must run: sudo chown root:root chrome-sandbox && sudo chmod 4755 chrome-sandbox"
 
       - name: Create GitHub Release
+        id: ghrelease
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.detect-version.outputs.version }}
           name: Grok Bot ${{ needs.detect-version.outputs.version }} (Linux port)
+          # Always overwrite: a workflow re-run rebuilds non-deterministic
+          # tarball bytes; skipping existing assets would publish the -bin
+          # checksum of bytes the release no longer serves.
+          overwrite_files: true
           body: |
             Linux port of Grok Bot `${{ needs.detect-version.outputs.version }}`.
 
@@ -329,40 +360,64 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Bump AUR PKGBUILDs
+        id: aur-bump
+        env:
+          VER: ${{ needs.detect-version.outputs.version }}
+          TARBALL_SUM: ${{ steps.artifacts.outputs.tarball_sum }}
+          REBUILD: ${{ needs.detect-version.outputs.rebuild }}
+        run: |
+          set -euo pipefail
+          [[ -d aur/grokbot-linux-port && -d aur/grokbot-linux-port-bin ]] || { echo "aur/ tree missing"; echo "changed=false" >> "${GITHUB_OUTPUT}"; exit 0; }
+
+          if [[ "${REBUILD}" == "true" ]]; then
+            # Rebuild resync: the tag and its source archive predate this
+            # run, so only the -bin package's freshly rebuilt bytes can be
+            # stale. Inject the new sum (a plain pkgrel bump would keep the
+            # stale checksum — the exact failure this workflow fixes) and
+            # bump pkgrel; AUR helpers ignore same-pkgrel updates. VERSION
+            # is left untouched — nothing version-related changed.
+            echo "Rebuild of ${VER} — resyncing -bin checksum + pkgrel"
+            bash scripts/update-aur.sh --bin-only --bin-sum "${TARBALL_SUM}" "${VER}"
+            echo "changed=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          echo "Bumping AUR packages to ${VER} (tarball sha256 ${TARBALL_SUM})"
+          bash scripts/update-aur.sh --bin-sum "${TARBALL_SUM}" "${VER}"
+          if git diff --quiet -- aur/; then
+            echo "AUR PKGBUILDs already carried ${VER} — nothing to commit"
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "changed=true" >> "${GITHUB_OUTPUT}"
+            for pkg in grokbot-linux-port grokbot-linux-port-bin; do
+              git add "aur/${pkg}/PKGBUILD" "aur/${pkg}/.SRCINFO"
+            done
+          fi
+
       - name: Update VERSION file and push
         env:
           DETECTED_VERSION: ${{ needs.detect-version.outputs.version }}
+          AUR_CHANGED: ${{ steps.aur-bump.outputs.changed }}
+          REBUILD: ${{ needs.detect-version.outputs.rebuild }}
         run: |
           set -euo pipefail
-          echo "${DETECTED_VERSION}" > VERSION
-          echo "Updated VERSION to ${DETECTED_VERSION}"
-          cat VERSION
 
-          # Configure git identity for the automated commit
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add VERSION
-          # Also bump AUR packages in the same commit when applicable.
-          # PKGBUILD pkgver/sha256sums are always updated; .SRCINFO is only
-          # regenerated when makepkg is available (Arch). On Ubuntu runners
-          # the .SRCINFO stays stale on purpose — the release commit carries
-          # the correct PKGBUILD, and README documents that .SRCINFO must be
-          # regenerated on Arch before pushing to aur.archlinux.org.
-          if [[ -d aur/grokbot-linux-port && -d aur/grokbot-linux-port-bin ]]; then
-            echo "Bumping AUR packages to ${DETECTED_VERSION}..."
-            bash scripts/update-aur.sh "${DETECTED_VERSION}" || echo "warn: update-aur.sh failed — VERSION will still be pushed" >&2
-            # Stage PKGBUILDs unconditionally; .SRCINFO only if it was actually regenerated (newer than PKGBUILD).
-            staged_pkgs=()
-            for pkg in grokbot-linux-port grokbot-linux-port-bin; do
-              git add "aur/${pkg}/PKGBUILD" 2>/dev/null || true
-              if [[ "aur/${pkg}/.SRCINFO" -nt "aur/${pkg}/PKGBUILD" ]]; then
-                git add "aur/${pkg}/.SRCINFO" 2>/dev/null || true
-              else
-                echo "note: aur/${pkg}/.SRCINFO not regenerated (makepkg unavailable) — staging PKGBUILD only" >&2
-              fi
-            done
+          if [[ "${REBUILD}" == "true" ]]; then
+            # Rebuild resync: only aur/-bin changed; stage and push it alone.
+            if [[ "${AUR_CHANGED}" == "true" ]]; then
+              git add aur/grokbot-linux-port-bin/PKGBUILD aur/grokbot-linux-port-bin/.SRCINFO
+              git commit -m "chore(aur): resync grokbot-linux-port-bin ${DETECTED_VERSION} tarball checksum"
+              git push origin "HEAD:${GITHUB_REF_NAME:-main}"
+            fi
+            exit 0
           fi
+
+          echo "${DETECTED_VERSION}" > VERSION
+          git add VERSION
           if git diff --cached --quiet; then
             echo "Nothing to commit (VERSION and AUR already up to date)."
             exit 0
@@ -374,4 +429,67 @@ jobs:
           else
             git commit -m "chore: bump VERSION to ${DETECTED_VERSION}"
           fi
-          git push origin HEAD:${{ github.ref_name || 'main' }}
+          git push origin "HEAD:${GITHUB_REF_NAME:-main}"
+
+  # -----------------------------------------------------------------------
+  # aur-publish — push PKGBUILD + .SRCINFO to aur.archlinux.org
+  #
+  # The release job only updates the aur/ tree in this repo; publishing to
+  # AUR requires the SSH deploy key (AUR_SSH_PRIVATE_KEY). Runs only when the
+  # release job actually changed aur/ (fresh version or rebuild resync).
+  # -----------------------------------------------------------------------
+  aur-publish:
+    needs: [release]
+    # Only publish when the release changed the AUR tree, and never from a PR.
+    if: needs.release.outputs.aur_changed == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # The release job pushed the AUR bump commit on top of the trigger
+          # SHA; without an explicit ref this job would check out the stale
+          # pre-bump tree and publish outdated checksums to AUR.
+          ref: ${{ github.ref_name }}
+
+      - name: Set up AUR SSH key
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${AUR_SSH_PRIVATE_KEY}" > ~/.ssh/id_ed25519_aur
+          chmod 600 ~/.ssh/id_ed25519_aur
+          ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          cat > ~/.ssh/config <<'EOF'
+          Host aur.archlinux.org
+            IdentityFile ~/.ssh/id_ed25519_aur
+            IdentitiesOnly yes
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Publish to AUR
+        env:
+          VER: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          for pkg in grokbot-linux-port grokbot-linux-port-bin; do
+            echo "::group::Publish ${pkg}"
+            tmp="$(mktemp -d)"
+            git clone "ssh://aur@aur.archlinux.org/${pkg}.git" "${tmp}/${pkg}"
+            cp "aur/${pkg}/PKGBUILD" "aur/${pkg}/.SRCINFO" "${tmp}/${pkg}/"
+            git -C "${tmp}/${pkg}" add PKGBUILD .SRCINFO
+            if git -C "${tmp}/${pkg}" diff --cached --quiet; then
+              echo "${pkg} already up to date on AUR"
+            else
+              git -C "${tmp}/${pkg}" commit -m "upgpkg: ${VER}"
+              git -C "${tmp}/${pkg}" push origin master
+            fi
+            rm -rf "${tmp}"
+            echo "::endgroup::"
+          done

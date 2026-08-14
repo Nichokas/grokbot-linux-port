@@ -137,15 +137,18 @@ generate_candidates() {
 emit_outputs() {
   local version="$1"
   local is_new="$2"
+  local rebuild="${3:-false}"
 
   # Human-readable stdout (Actions log + local run)
   echo "version=${version}"
   echo "is_new=${is_new}"
+  echo "rebuild=${rebuild}"
 
   if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     {
       echo "version=${version}"
       echo "is_new=${is_new}"
+      echo "rebuild=${rebuild}"
     } >> "${GITHUB_OUTPUT}"
   fi
 }
@@ -166,12 +169,18 @@ main() {
       # Dispatched version bypasses the > base gate — if it probes 200 it is
       # authoritative regardless of candidate set, per the fallback contract.
       if [[ "${dispatch}" == "${base}" ]]; then
+        # Dispatching the current base version means "rebuild it": port.sh
+        # fixes (and thus AUR -bin checksum changes) never reach users
+        # otherwise, since scheduled runs only fire on newer upstream
+        # versions. The release job re-uploads the artifacts and the
+        # AUR bump takes the --bin-only resync path.
         is_new="false"
+        emit_outputs "${dispatch}" "${is_new}" "true"
       else
         # Treat any verified dispatched version differing from base as actionable.
         is_new="true"
+        emit_outputs "${dispatch}" "${is_new}"
       fi
-      emit_outputs "${dispatch}" "${is_new}"
       # Also emit bare version on stdout for capture via $(detect-version.sh)
       # callers that parse the last line.
       printf '%s\n' "${dispatch}"
