@@ -93,7 +93,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
 
       - name: Cache Electron binary
         uses: actions/cache@v4
@@ -117,14 +121,15 @@ jobs:
       - name: Install Node dependencies (rebuild tooling)
         run: |
           set -euo pipefail
-          # Install rebuild and packaging tooling.  --no-save keeps the repo
-          # package.json untouched — these are ephemeral CI dependencies.
-          if [[ -f package.json ]]; then
-            npm install --no-audit --no-fund
+          # No lockfile needed — tools are invoked via bunx/npx at build time.
+          # Pre-warm the cache for faster port.sh execution.
+          if command -v bun >/dev/null 2>&1; then
+            bunx --yes @electron/asar --help >/dev/null 2>&1 || true
+            bunx --yes @electron/rebuild --help >/dev/null 2>&1 || true
+          else
+            npx --yes @electron/asar --help >/dev/null 2>&1 || true
+            npx --yes @electron/rebuild --help >/dev/null 2>&1 || true
           fi
-          npm install --no-save --no-audit --no-fund \
-            @electron/rebuild \
-            @electron/asar
 
       - name: Build Linux port for ${{ needs.detect-version.outputs.version }}
         env:
