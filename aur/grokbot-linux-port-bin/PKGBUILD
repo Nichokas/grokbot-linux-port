@@ -2,7 +2,7 @@
 # Binary variant — downloads the prebuilt Linux tarball from GitHub Releases.
 pkgname=grokbot-linux-port-bin
 pkgver=0.20.0
-pkgrel=1
+pkgrel=2
 pkgdesc="Grok Bot desktop — wine-less Linux port (prebuilt tarball from GitHub Releases)"
 arch=('x86_64')
 url="https://github.com/Nichokas/grokbot-linux-port"
@@ -33,14 +33,18 @@ package() {
   # install root-only directories. Normalise before copying.
   chmod -R u+rwX,go+rX,go-w "${staged}"
 
-  # Refuse to package a tarball whose native modules are still Windows PE
-  # binaries — they dlopen-fail at runtime with "invalid ELF header".
+  # Refuse to package a tarball whose loadable native modules are still
+  # Windows PE binaries — they dlopen-fail at runtime with "invalid ELF
+  # header". Dead-on-Linux PE leftovers (win32 prebuild dirs, napi-rs
+  # *.win32-*.node filenames) are tolerated: Linux loaders never resolve them.
   if [[ "${GROKBOT_ALLOW_BROKEN_NATIVE:-}" != "1" ]]; then
-    local mz_hits
-    mz_hits="$(find "${staged}" -name '*.node' -type f -exec sh -c \
-      'head -c 2 "$1" | grep -q MZ && echo x' _ {} \; 2>/dev/null | wc -l)"
-    if [[ "${mz_hits}" -gt 0 ]]; then
-      echo "error: ${mz_hits} .node files in the tarball are win32 (MZ header) — upstream rebuild failed" >&2
+    local mz_live
+    mz_live="$(find "${staged}" -name '*.node' -type f -exec sh -c \
+      'head -c 2 "$1" | grep -q MZ && printf "%s\n" "$1"' _ {} \; 2>/dev/null \
+      | grep -v -e '/prebuilds/win32-' -e '\.win32-[^/]*\.node$' || true)"
+    if [[ -n "${mz_live}" ]]; then
+      echo "error: loadable .node files in the tarball are win32 (MZ header) — upstream rebuild failed:" >&2
+      printf '%s\n' "${mz_live}" | head -n 10 >&2
       echo "hint:  install grokbot-linux-port (builds from source) instead, or rebuild upstream via scripts/port.sh" >&2
       echo "hint:  GROKBOT_ALLOW_BROKEN_NATIVE=1 makepkg -si forces a known-broken install (debug only)" >&2
       exit 1

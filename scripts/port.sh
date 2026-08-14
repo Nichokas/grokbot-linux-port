@@ -365,9 +365,12 @@ main() {
   # --module-dir, patching better-sqlite3 for the Node 24 ExternalPointerTypeTag
   # arity change and using the bundled node-addon-api via NODE_PATH. NAPI/Rust
   # modules (whichlang-node, @anysphere/tree-chunk-napi) use npm prebuilds or
-  # cargo; tree-chunk's Rust source is not bundled (private Anysphere crate) so
-  # that single .node remains win32 — callers are expected to tolerate its load
-  # failure on Linux until upstream ships a linux-x64-gnu prebuild.
+  # cargo; cursor-proclist and tree-chunk-napi have no Linux source or prebuild
+  # (private Anysphere code), so their .node files are rewritten to a
+  # dependency-free N-API stub (scripts/native-stubs/linux-stub.cc). The stub
+  # is a valid ELF that loads with empty exports — node-gyp-build resolves it,
+  # and calling code reads "feature unavailable" instead of dying in dlopen
+  # with "invalid ELF header".
   #
   # Both app.asar:dist/deps/ (packed) and resources/app.asar.unpacked/dist/deps/
   # carry PE binaries before the fix; rebuild against app.asar.unpacked, then
@@ -481,6 +484,34 @@ else:
 PYPATCH
     }
 
+    # compile_native_stub — build the dependency-free N-API stub used to
+    # replace Windows-only .node blobs that have no Linux source or prebuild.
+    # Flags keep the output minimal and bit-for-bit reproducible (no build-id
+    # or debug nondeterminism) so repacked artefacts hash-stabilise.
+    compile_native_stub() {
+      local dest="$1"
+      local node_include=""
+      local cand
+      for cand in /usr/include/node /usr/include/nodejs /usr/local/include/node; do
+        if [[ -f "${cand}/node_api.h" ]]; then
+          node_include="${cand}"
+          break
+        fi
+      done
+      if [[ -z "${node_include}" ]]; then
+        cand="$(find /usr/include /usr/local/include -maxdepth 3 -name node_api.h -print -quit 2>/dev/null || true)"
+        [[ -n "${cand}" ]] && node_include="$(dirname "${cand}")"
+      fi
+      if [[ -z "${node_include}" ]]; then
+        echo "error: node_api.h not found — install the nodejs development headers (nodejs-dev/libnode-dev)" >&2
+        return 1
+      fi
+      g++ -shared -fPIC -s -O2 \
+        -Wl,-z,noexecstack -Wl,--build-id=none \
+        -I"${node_include}" \
+        "${SCRIPT_DIR}/native-stubs/linux-stub.cc" -o "${dest}"
+    }
+
     fix_one_node_module() {
       local name="$1"
       local kind="$2"
@@ -581,11 +612,13 @@ PYPATCH
               fi
             fi
           elif [[ "$name" == "cursor-proclist" ]]; then
-            echo "  note: ${name} is a private Anysphere module without C++ sources in this archive — leaving PE blob in place (no linux prebuild published)" >&2
-            if [[ "${GROKBOT_STRICT_CURSOR_PROCLIST:-}" == "1" ]]; then
-              echo "error: GROKBOT_STRICT_CURSOR_PROCLIST=1 forbids remaining PE cursor-proclist" >&2
-              exit 1
-            fi
+            # Private Anysphere module with no C++ sources and no linux prebuild:
+            # node-gyp-build resolves build/Release/ first on every platform, so
+            # the vendored PE would win on Linux and crash dlopen. Replace it
+            # with the N-API stub; the guarded require reads empty exports as
+            # "feature unavailable" (idle-time process scan).
+            echo "  replacing ${name} win32 blob with N-API stub (no linux source available)" >&2
+            compile_native_stub "${mod_dir}/build/Release/cursor_proclist.node"
           else
             echo "  rebuilding ${name} (node-gyp, --module-dir ${mod_dir})" >&2
             if ! (NODE_PATH="${deps_root}:${deps_root}/node-addon-api:${NODE_PATH:-}" \
@@ -630,18 +663,14 @@ PYPATCH
 
         napi-tree-chunk)
           # Private Anysphere crate: dist has no Cargo.toml and npm has no
-          # @anysphere/tree-chunk-napi-linux-x64-gnu tarball. Rebuilding from
-          # source is not possible without the crate's Rust source. Keep the
-          # existing win32 blob; host (dist/host/host-main.cjs) requires it via
-          # require("@anysphere/tree-chunk-napi") near top-level and will fail
-          # on Linux if that code path runs. Document and carry on — producing
-          # a tarball whose other 5 natives are ELF is strictly better than
-          # shipping 6 PE binaries.
-          echo "  note: ${name} is a private Rust crate without a linux prebuild in this archive — leaving PE blob in place" >&2
-          if [[ "${GROKBOT_STRICT_TREE_CHUNK:-}" == "1" ]]; then
-            echo "error: GROKBOT_STRICT_TREE_CHUNK=1 forbids a remaining PE tree-chunk-napi" >&2
-            exit 1
-          fi
+          # @anysphere/tree-chunk-napi-linux-x64-gnu tarball. The napi-rs loader
+          # probes tree-chunk-napi.linux-x64-gnu.node first on glibc hosts — a
+          # path the win32 tarball never ships — so place the N-API stub there.
+          # host-main.cjs requires it unguarded at top level; without the stub
+          # the host subprocess dies on spawn ("Cannot find module"), with the
+          # stub it starts and only tree-chunk call sites fail.
+          echo "  placing N-API stub at ${name}.linux-x64-gnu.node (no linux crate or prebuild)" >&2
+          compile_native_stub "${mod_dir}/tree-chunk-napi.linux-x64-gnu.node"
           ;;
 
         *)
@@ -670,7 +699,8 @@ PYPATCH
         "tree-sitter/build/Release/tree_sitter_runtime_binding.node" \
         "tree-sitter-bash/build/Release/tree_sitter_bash_binding.node" \
         "whichlang-node/whichlang-node.linux-x64-gnu.node" \
-        "whichlang-node/whichlang-node.linux-x64-musl.node"; do
+        "whichlang-node/whichlang-node.linux-x64-musl.node" \
+        "@anysphere/tree-chunk-napi/tree-chunk-napi.linux-x64-gnu.node"; do
         if [[ -f "${deps_root}/${rel}" ]]; then
           mkdir -p "${asar_tmp}/dist/deps/$(dirname "$rel")"
           cp -f "${deps_root}/${rel}" "${asar_tmp}/dist/deps/${rel}"
@@ -701,43 +731,34 @@ PYPATCH
       fi
     fi
 
-    # Hard gate: any MZ/PE header remaining is a Windows binary that will
-    # dlopen-fail with "invalid ELF header". Exempt private crates whose
-    # sources/prebuilds are unpublished — cursor-proclist (no .cc shipped) and
-    # tree-chunk-napi (no linux prebuild). Strict flags gate each.
-    local mz_hits mz_list
+    # Hard gate: fail if any *loadable* native is still a Windows PE. A
+    # remaining MZ blob is only dead code when Linux loaders can provably
+    # never resolve it — win32 prebuild dirs (node-gyp-build filter) or
+    # napi-rs's *.win32-*.node filenames. Anything else (build/Release PE,
+    # misnamed blob) would be dlopened at runtime and crash the process.
+    local mz_list mz_live
     mz_list="$(find "${staged}/resources/app.asar.unpacked" -name "*.node" -type f -exec sh -c \
       'head -c 2 "$1" | grep -q MZ && printf "%s\n" "$1"' _ {} \; 2>/dev/null || true)"
+    mz_live=""
     if [[ -n "${mz_list}" ]]; then
-      local filtered="$mz_list"
-      if [[ "${GROKBOT_STRICT_TREE_CHUNK:-}" != "1" ]]; then
-        filtered="$(printf '%s\n' "$filtered" | grep -v "tree-chunk-napi" || true)"
+      mz_live="$(printf '%s\n' "${mz_list}" \
+        | grep -v -e '/prebuilds/win32-' -e '\.win32-[^/]*\.node$' 2>/dev/null || true)"
+    fi
+    if [[ -n "${mz_live}" ]]; then
+      local mz_count
+      mz_count="$(printf '%s\n' "${mz_live}" | grep -c . || true)"
+      if [[ "${GROKBOT_ALLOW_BROKEN_NATIVE:-}" == "1" ]]; then
+        echo "warn: ${mz_count} loadable win32 .node binaries remain — GROKBOT_ALLOW_BROKEN_NATIVE=1 override active" >&2
+        printf '%s\n' "${mz_live}" | head -n 20 >&2
+      else
+        echo "error: ${mz_count} loadable .node files still carry MZ header after rebuild" >&2
+        printf '%s\n' "${mz_live}" | head -n 20 >&2
+        echo "hint:  fix the rebuild toolchain (python3, make, g++, @electron/rebuild deps) or set GROKBOT_ALLOW_BROKEN_NATIVE=1" >&2
+        exit 1
       fi
-      if [[ "${GROKBOT_STRICT_CURSOR_PROCLIST:-}" != "1" ]]; then
-        filtered="$(printf '%s\n' "$filtered" | grep -v -e "cursor-proclist" -e "cursor_proclist" || true)"
-      fi
-      # Win32 prebuild directories are never resolved on linux (node-gyp-build
-      # matches on process.platform). Exempt the shipped win32 blobs that are
-      # dead code after the linux prebuilds are added.
-      if [[ "${GROKBOT_STRICT_WIN32_PREBUILDS:-}" != "1" ]]; then
-        filtered="$(printf '%s\n' "$filtered" | grep -v -e "whichlang-node-win32" -e "prebuilds/win32" || true)"
-      fi
-      mz_hits="$(printf '%s\n' "$filtered" | grep -c . || true)"
-      # shellcheck disable=SC2086
-      if [[ "${mz_hits}" != "0" && -n "${mz_hits}" && "${mz_hits}" -gt 0 ]]; then
-        if [[ "${GROKBOT_ALLOW_BROKEN_NATIVE:-}" == "1" ]]; then
-          echo "warn: ${mz_hits} win32 .node binaries still present after rebuild — GROKBOT_ALLOW_BROKEN_NATIVE=1 override active" >&2
-          printf '%s\n' "$filtered" | head -n 20 >&2
-        else
-          echo "error: ${mz_hits} .node files still carry MZ header after rebuild — @electron/rebuild did not replace them" >&2
-          printf '%s\n' "$filtered" | head -n 20 >&2
-          echo "hint:  fix the rebuild toolchain (python3, make, g++, @electron/rebuild deps) or set GROKBOT_ALLOW_BROKEN_NATIVE=1" >&2
-          exit 1
-        fi
-      elif [[ -n "${mz_list}" ]]; then
-        echo "note: exempted win32 native blob(s) remain (private crates) — allowed" >&2
-        printf '  %s\n' "$mz_list" | head -n 5 >&2
-      fi
+    elif [[ -n "${mz_list}" ]]; then
+      echo "note: dead win32 blob(s) remain, unreachable by Linux loaders (prebuilds/win32-*, *.win32-*.node):" >&2
+      printf '  %s\n' "${mz_list}" | head -n 5 >&2
     fi
     echo "Native rebuild completed." >&2
   fi
