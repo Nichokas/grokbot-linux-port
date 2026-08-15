@@ -7,7 +7,7 @@ It exists because there is no official Linux build.
 Found a bug? Please open an issue. I'd really appreciate it!
 
 ## Install
-
+Don't see your distro listed above? I'd be happy to add support for your package manager, just open an issue!
 **Arch (AUR):**
 
 ```bash
@@ -48,23 +48,6 @@ Manual build of a specific version:
 ```bash
 gh workflow run auto-update.yml -f version=0.20.0   # on GitHub
 scripts/port.sh 0.20.0                               # locally (requires p7zip, curl, unzip, node 22, python3)
-```
-
-## AUR Maintenance
-
-CI updates `aur/*/PKGBUILD` + `.SRCINFO` on every release and publishes them to `aur.archlinux.org` automatically (`aur-publish` job, with the key from the `AUR_SSH_PRIVATE_KEY` secret). The `-bin` tarball checksum is computed over the exact bytes uploaded by the `release` job (`--bin-sum`), not by re-downloading the published URL: GitHub's CDN can keep serving the previous asset during propagation, which is how stale checksums were published in 0.20.0.
-
-Manual push (only if the `aur-publish` job fails):
-
-```bash
-for pkg in grokbot-linux-port grokbot-linux-port-bin; do
-  rm -rf /tmp/aur-$pkg
-  git clone ssh://aur@aur.archlinux.org/$pkg.git /tmp/aur-$pkg
-  cp -a aur/$pkg/{PKGBUILD,.SRCINFO} /tmp/aur-$pkg/
-  git -C /tmp/aur-$pkg add PKGBUILD .SRCINFO
-  git -C /tmp/aur-$pkg commit -m "upgpkg: X.Y.Z-1" || true
-  git -C /tmp/aur-$pkg push
-done
 ```
 
 ## Troubleshooting
