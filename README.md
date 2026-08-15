@@ -8,6 +8,7 @@ Found a bug? Please open an issue. I'd really appreciate it!
 
 ## Install
 Don't see your distro listed above? I'd be happy to add support for your package manager, just open an issue!
+
 **Arch (AUR):**
 
 ```bash
