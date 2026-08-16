@@ -27,6 +27,8 @@ name: Auto Update
     paths:
       - "scripts/port.sh"
       - "scripts/detect-version.sh"
+      - "scripts/update-spec.sh"
+      - "grokbot-linux-port.spec"
       - "aur/**"
       - ".github/workflows/auto-update.yml"
 
@@ -257,6 +259,34 @@ jobs:
           exit "${failed}" 
 
   # -----------------------------------------------------------------------
+  # spec-lint — validate the RPM spec on PRs touching it
+  #
+  # Same idea as aur-lint for the COPR side: rpmbuild -bs parses the spec
+  # fully (macros, %prep/%install/%files) without downloading Source0, so a
+  # broken spec fails here instead of inside COPR's srpm stage.
+  # -----------------------------------------------------------------------
+  spec-lint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Lint RPM spec
+        run: |
+          set -euo pipefail
+          dnf install -y rpm-build rpmdevtools >/dev/null
+          bash -n scripts/update-spec.sh
+          mkdir -p /tmp/rpmlint/SOURCES
+          rpmbuild -bs --define "_topdir /tmp/rpmlint" grokbot-linux-port.spec
+          if command -v rpmlint >/dev/null 2>&1; then
+            rpmlint grokbot-linux-port.spec || echo "  (rpmlint warnings — non-fatal)"
+          fi
+
+  # -----------------------------------------------------------------------
   # release — publish GitHub Release, upload artefacts, bump VERSION
   #
   # Downloads the build artefacts, creates (or updates) a GitHub Release via
@@ -279,6 +309,7 @@ jobs:
       version: ${{ needs.detect-version.outputs.version }}
       tarball_sum: ${{ steps.artifacts.outputs.tarball_sum }}
       aur_changed: ${{ steps.aur-bump.outputs.changed }}
+      spec_changed: ${{ steps.spec-bump.outputs.changed }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -395,10 +426,37 @@ jobs:
             done
           fi
 
+      - name: Bump RPM spec (COPR)
+        id: spec-bump
+        env:
+          VER: ${{ needs.detect-version.outputs.version }}
+          TARBALL_SUM: ${{ steps.artifacts.outputs.tarball_sum }}
+          REBUILD: ${{ needs.detect-version.outputs.rebuild }}
+        run: |
+          set -euo pipefail
+          [[ -f grokbot-linux-port.spec ]] || { echo "grokbot-linux-port.spec missing"; echo "changed=false" >> "${GITHUB_OUTPUT}"; exit 0; }
+
+          if [[ "${REBUILD}" == "true" ]]; then
+            # Same resync semantics as the AUR -bin package: freshly rebuilt
+            # release bytes need the new checksum plus a Release bump so
+            # installed clients pick the update up.
+            bash scripts/update-spec.sh --bump-release --sum "${TARBALL_SUM}" "${VER}"
+          else
+            bash scripts/update-spec.sh --sum "${TARBALL_SUM}" "${VER}"
+          fi
+          if git diff --quiet -- grokbot-linux-port.spec; then
+            echo "spec already carried ${VER} — nothing to commit"
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "changed=true" >> "${GITHUB_OUTPUT}"
+            git add grokbot-linux-port.spec
+          fi
+
       - name: Update VERSION file and push
         env:
           DETECTED_VERSION: ${{ needs.detect-version.outputs.version }}
           AUR_CHANGED: ${{ steps.aur-bump.outputs.changed }}
+          SPEC_CHANGED: ${{ steps.spec-bump.outputs.changed }}
           REBUILD: ${{ needs.detect-version.outputs.rebuild }}
         run: |
           set -euo pipefail
@@ -407,10 +465,15 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           if [[ "${REBUILD}" == "true" ]]; then
-            # Rebuild resync: only aur/-bin changed; stage and push it alone.
-            if [[ "${AUR_CHANGED}" == "true" ]]; then
-              git add aur/grokbot-linux-port-bin/PKGBUILD aur/grokbot-linux-port-bin/.SRCINFO
-              git commit -m "chore(aur): resync grokbot-linux-port-bin ${DETECTED_VERSION} tarball checksum"
+            # Rebuild resync: only aur/-bin and the spec changed; push them alone.
+            if [[ "${AUR_CHANGED}" == "true" || "${SPEC_CHANGED}" == "true" ]]; then
+              if [[ "${AUR_CHANGED}" == "true" ]]; then
+                git add aur/grokbot-linux-port-bin/PKGBUILD aur/grokbot-linux-port-bin/.SRCINFO
+              fi
+              if [[ "${SPEC_CHANGED}" == "true" ]]; then
+                git add grokbot-linux-port.spec
+              fi
+              git commit -m "chore: resync ${DETECTED_VERSION} tarball checksum (aur -bin + rpm spec)"
               git push origin "HEAD:${GITHUB_REF_NAME:-main}"
             fi
             exit 0
@@ -419,7 +482,7 @@ jobs:
           echo "${DETECTED_VERSION}" > VERSION
           git add VERSION
           if git diff --cached --quiet; then
-            echo "Nothing to commit (VERSION and AUR already up to date)."
+            echo "Nothing to commit (VERSION, AUR and spec already up to date)."
             exit 0
           fi
           if git diff --cached --name-only | grep -q "^aur/" && git diff --cached --name-only | grep -q "^VERSION"; then
