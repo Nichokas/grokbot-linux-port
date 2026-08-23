@@ -35,7 +35,7 @@ sudo chown root:root chrome-sandbox && sudo chmod 4755 chrome-sandbox
 
 | Component | Version |
 |-----------|---------|
-| Grok Bot  | [`VERSION`](./VERSION) (0.20.0) |
+| Grok Bot  | [`VERSION`](./VERSION) |
 | Electron  | 42.1.0 |
 
 ## How it works
