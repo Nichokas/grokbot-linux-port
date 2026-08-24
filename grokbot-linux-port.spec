@@ -11,7 +11,7 @@
 
 Name:           grokbot-linux-port
 Version:        0.24.0
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        Grok Bot desktop — wine-less Linux port (prebuilt tarball)
 
 # Upstream EULA lives inside resources/app.asar; see the installed LICENSE.
@@ -31,6 +31,7 @@ ExclusiveArch:  x86_64
 BuildRequires:  coreutils
 BuildRequires:  findutils
 BuildRequires:  tar
+BuildRequires:  python3
 
 # Runtime libraries for Electron 42 (names translated from the AUR depends).
 Requires:       alsa-lib
@@ -108,20 +109,54 @@ Terminal=false
 DESKTOP
 
 # The desktop entry always ships; the icon joins the same filelist only when
-# a PNG is found (current tarballs embed it in app.asar, so the package
-# ships without one, same as the AUR package). A -f filelist must contain at
-# least one real entry, hence anchoring it on the desktop file.
+# a PNG is found. Current tarballs keep it inside packed app.asar, so a
+# filesystem hunt fails — extract from asar in that case. A -f filelist must
+# contain at least one real entry, hence anchoring it on the desktop file.
 echo "%{_datadir}/applications/grok-bot.desktop" > extra.filelist
 icon=""
 for cand in \
+  grok-bot.png \
   resources/app.asar.unpacked/dist/renderer/assets/app-icon-*.png \
-  resources/app.asar.unpacked/*.png \
-  grok-bot.png
+  resources/app.asar.unpacked/*.png
 do
   [ -f "${cand}" ] && { icon="${cand}"; break; }
 done
 if [ -z "${icon}" ]; then
   icon="$(find . -name 'app-icon*.png' -print -quit || true)"
+fi
+if [ -z "${icon}" ] && [ -f resources/app.asar ]; then
+  python3 - resources/app.asar grok-bot-from-asar.png <<'PY' && icon=grok-bot-from-asar.png
+import json, pathlib, struct, sys
+
+def walk(node, prefix=""):
+    for name, meta in node.get("files", {}).items():
+        path = f"{prefix}/{name}" if prefix else name
+        if "files" in meta:
+            yield from walk(meta, path)
+        else:
+            yield path, meta
+
+asar, dest = sys.argv[1], sys.argv[2]
+with open(asar, "rb") as fh:
+    if struct.unpack("<I", fh.read(4))[0] != 4:
+        raise SystemExit("bad asar pickle")
+    header_size = struct.unpack("<I", fh.read(4))[0]
+    header_pickle = fh.read(header_size)
+    str_len = struct.unpack_from("<I", header_pickle, 4)[0]
+    header = json.loads(header_pickle[8:8 + str_len])
+    hits = [
+        (p, m) for p, m in walk(header)
+        if p.rsplit("/", 1)[-1].startswith("app-icon") and p.endswith(".png") and "offset" in m
+    ]
+    if not hits:
+        raise SystemExit("no app-icon*.png in asar")
+    path, meta = max(hits, key=lambda item: int(item[1]["size"]))
+    fh.seek(8 + header_size + int(meta["offset"]))
+    blob = fh.read(int(meta["size"]))
+    if blob[:8] != b"\x89PNG\r\n\x1a\n":
+        raise SystemExit("not a PNG")
+    pathlib.Path(dest).write_bytes(blob)
+PY
 fi
 if [ -n "${icon}" ] && [ -f "${icon}" ]; then
   install -m644 "${icon}" %{buildroot}%{_datadir}/icons/hicolor/256x256/apps/grok-bot.png

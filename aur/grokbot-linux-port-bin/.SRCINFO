@@ -1,10 +1,11 @@
 pkgbase = grokbot-linux-port-bin
 	pkgdesc = Grok Bot desktop — wine-less Linux port (prebuilt tarball from GitHub Releases)
 	pkgver = 0.24.0
-	pkgrel = 2
+	pkgrel = 3
 	url = https://github.com/Nichokas/grokbot-linux-port
 	arch = x86_64
 	license = custom
+	makedepends = python
 	depends = alsa-lib
 	depends = gtk3
 	depends = nss
