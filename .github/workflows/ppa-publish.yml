@@ -1,0 +1,109 @@
+name: PPA publish
+
+# Build Debian source packages from the prebuilt release tarball and upload to
+# Launchpad PPA ppa:nichito/grokbot-linux-port. Launchpad builders have no
+# network, so the tarball itself is the native source. Minimal analogue of
+# copr-publish.yml — triggered by repository_dispatch from auto-update's release
+# job (GITHUB_TOKEN pushes suppress push events, same reason COPR uses dispatch)
+# plus manual workflow_dispatch. Secret PPA_GPG_PRIVATE_KEY must be an
+# armored private key registered in Launchpad; passphrase must be empty
+# (gpg --batch --pinentry-mode loopback) or the workflow will hang.
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [ppa-rebuild]
+
+permissions:
+  contents: read
+
+jobs:
+  ppa-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve version and download release tarball
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ver="$(cat VERSION | tr -d '[:space:]')"
+          echo "VERSION=${ver}"
+          tarball="Grok_Bot_${ver}_linux_x64.tar.gz"
+          mkdir -p dist
+          gh release download "v${ver}" --pattern "${tarball}" --dir dist --clobber
+          ls -lh dist/
+
+      - name: Install Debian packaging tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          # debhelper + devscripts (dpkg-buildpackage/dpkg-source) + dput + gnupg
+          # No equivs — dependencies are static, no mk-build-deps needed
+          sudo apt-get install -y --no-install-recommends debhelper devscripts dput gnupg
+
+      - name: Import GPG signing key
+        id: gpg
+        env:
+          PPA_GPG_PRIVATE_KEY: ${{ secrets.PPA_GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${PPA_GPG_PRIVATE_KEY}" ]]; then
+            echo "::error::PPA_GPG_PRIVATE_KEY secret is not set (armored private key, passphrase empty, registered in Launchpad)" >&2
+            exit 1
+          fi
+          # Import via temp file — secrets must not be echoed
+          tmp="$(mktemp)"
+          printf '%s' "${PPA_GPG_PRIVATE_KEY}" > "${tmp}"
+          # --batch + loopback so an empty passphrase does not prompt
+          gpg --batch --pinentry-mode loopback --import "${tmp}" 2>&1 | sed 's/^/  [gpg] /'
+          rm -f "${tmp}"
+          # Resolve signing key id (long keyid, 16 hex)
+          keyid="$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/{print $5; exit}')"
+          if [[ -z "${keyid}" ]]; then
+            echo "::error::no secret key found after import" >&2
+            gpg --list-keys 2>&1 | sed 's/^/  [gpg] /' >&2 || true
+            exit 1
+          fi
+          echo "keyid=${keyid}" >> "${GITHUB_OUTPUT}"
+          echo "Imported GPG key ${keyid}"
+
+      - name: Build Debian source packages
+        env:
+          KEYID: ${{ steps.gpg.outputs.keyid }}
+        run: |
+          set -euo pipefail
+          ver="$(cat VERSION | tr -d '[:space:]')"
+          tarball="dist/Grok_Bot_${ver}_linux_x64.tar.gz"
+          sha="$(sha256sum "${tarball}" | awk '{print $1}')"
+          echo "tarball=${tarball} sha256=${sha:0:12}…"
+          bash scripts/build-deb.sh --tarball "${tarball}" --sha256 "${sha}" --sign-key "${KEYID}" --out-dir ppa-out
+          echo "Built source packages:"
+          find ppa-out -type f | sort | xargs -r ls -lh
+
+      - name: Upload to PPA (dput)
+        run: |
+          set -euo pipefail
+          # Retry once — Launchpad occasionally 503s on upload; CDN propagation
+          # of the release tarball is not a factor here (tarball is baked into
+          # the source package, not fetched by the builder).
+          for ser in noble resolute; do
+            echo "::group::dput ${ser}"
+            changes="$(ls ppa-out/${ser}/*_source.changes 2>/dev/null | head -n 1 || true)"
+            if [[ -z "${changes}" ]]; then
+              echo "::error::no _source.changes for ${ser}" >&2
+              exit 1
+            fi
+            attempt=0
+            until dput "ppa:nichito/grokbot-linux-port" "${changes}"; do
+              attempt=$((attempt + 1))
+              if [[ ${attempt} -ge 2 ]]; then
+                echo "::error::dput failed for ${ser} after ${attempt} attempts" >&2
+                exit 1
+              fi
+              echo "dput failed for ${ser} — retrying in 10s (attempt ${attempt}/2)..." >&2
+              sleep 10
+            done
+            echo "::endgroup::"
+          done
