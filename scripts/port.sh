@@ -764,6 +764,25 @@ PYPATCH
   fi
 
   # -----------------------------------------------------------------------
+  # 6b. Desktop icon
+  #
+  # app-icon-*.png lives inside packed app.asar, not app.asar.unpacked, so a
+  # find(1) of the staged tree returns nothing. Extract it to grok-bot.png
+  # at the tarball root; the AUR PKGBUILDs, the RPM spec, and the AppImage
+  # AppDir all look for that name. Best-effort: a missing icon must not
+  # fail the tarball.
+  # -----------------------------------------------------------------------
+  local asar_path="${staged}/resources/app.asar"
+  local icon_dest="${staged}/grok-bot.png"
+  if [[ -f "${asar_path}" ]]; then
+    if python3 "${SCRIPT_DIR}/extract-asar-icon.py" "${asar_path}" "${icon_dest}"; then
+      echo "Staged desktop icon: ${icon_dest} ($(wc -c < "${icon_dest}") bytes)" >&2
+    else
+      echo "warn: could not extract app-icon from app.asar — packages will ship without a hicolor icon" >&2
+    fi
+  fi
+
+  # -----------------------------------------------------------------------
   # 7. chrome-sandbox permissions
   #
   # Electron requires chrome-sandbox to be owned by root and setuid 4755.
@@ -814,41 +833,16 @@ PYPATCH
     cp -a "${staged}/." "${appdir}/usr/bin/"
 
     local icon_src=""
+    # Prefer the icon planted in 6b; fall back to a loose PNG if port.sh
+    # ran against an older tree that already unpacked one.
     local icon_candidates=(
-      "${staged}/resources/app.asar.unpacked/dist/renderer/assets/app-icon-C7NKj2u7.png"
+      "${staged}/grok-bot.png"
+      "${staged}/resources/app.asar.unpacked/dist/renderer/assets/app-icon-"*.png
     )
-    # Also probe extracted asar for version-pinned icon names
-    local asar_icon_probe=""
-    if command -v python3 >/dev/null 2>&1; then
-      asar_icon_probe="$(python3 -c "
-import subprocess, sys, json, os, pathlib
-staged = sys.argv[1]
-asar = os.path.join(staged, 'resources', 'app.asar')
-try:
-    out = subprocess.check_output(['npx','--yes','@electron/asar','list', asar], stderr=subprocess.DEVNULL, text=True, timeout=10)
-    for line in out.splitlines():
-        if 'app-icon' in line and line.endswith('.png'):
-            print(line.strip())
-            break
-except Exception:
-    pass
-" "${staged}" 2>/dev/null || true)"
-      if [[ -n "${asar_icon_probe}" ]]; then
-        local tmp_icon_dir="${workdir}/asar-icon-extract"
-        mkdir -p "${tmp_icon_dir}"
-        if npx --yes @electron/asar extract "${staged}/resources/app.asar" "${tmp_icon_dir}" >/dev/null 2>&1; then
-          local extracted_icon="${tmp_icon_dir}/${asar_icon_probe#/}"
-          [[ -f "${extracted_icon}" ]] && icon_src="${extracted_icon}"
-        fi
-      fi
-    fi
-    if [[ -z "${icon_src}" ]]; then
-      for cand in "${icon_candidates[@]}"; do
-        if [[ -f "${cand}" ]]; then icon_src="${cand}"; break; fi
-      done
-    fi
+    for cand in "${icon_candidates[@]}"; do
+      if [[ -f "${cand}" ]]; then icon_src="${cand}"; break; fi
+    done
     if [[ -z "${icon_src}" || ! -f "${icon_src}" ]]; then
-      # Fallback: any png under staged icon paths
       icon_src="$(find "${staged}" -name "app-icon*.png" -print -quit 2>/dev/null || true)"
     fi
 
