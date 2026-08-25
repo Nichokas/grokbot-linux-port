@@ -498,8 +498,12 @@ jobs:
         # GitHub suppresses push events for commits pushed with GITHUB_TOKEN,
         # so copr-publish.yml's push trigger never sees this automated bump;
         # fire its repository_dispatch directly instead. Human pushes to main
-        # still reach it through the normal push trigger.
-        if: steps.spec-bump.outputs.changed == 'true'
+        # still reach it through the normal push trigger. A repository_dispatch
+        # always runs copr-publish.yml at the default-branch head, so only
+        # poke when the spec bump actually landed there — a dispatch run from
+        # another branch pushes its bump elsewhere and poking would rebuild
+        # stale main sources.
+        if: steps.spec-bump.outputs.changed == 'true' && github.ref_name == github.event.repository.default_branch
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
