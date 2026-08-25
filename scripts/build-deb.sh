@@ -7,7 +7,7 @@ set -euo pipefail
 # (3.0 (native)), so no .orig/.debian split. Build-Depends are static t64 names
 # (noble renamed libasound2→libasound2t64 etc.; the `| alt` covers resolute
 # whether it kept t64 or reverted). Version is per-ubuntu-series:
-#   <ver>~ppa1~<serie>1  (e.g. 0.25.0~ppa1~noble1)
+#   <ver>~ppa<N>~<serie>1  (e.g. 0.25.0~ppa1~noble1; N mirrors the spec Release counter)
 # dpkg-buildpackage -S produces .dsc/.changes/.tar.gz; with --sign-key they are
 # GPG-signed (Launchpad requires signed .changes/.dsc).
 
@@ -68,6 +68,12 @@ if ! [[ "${TARBALL_BASENAME}" =~ Grok_Bot_([0-9]+\.[0-9]+\.[0-9]+)_linux_x64\.ta
 fi
 VER="${BASH_REMATCH[1]}"
 
+# Debian revision (~ppa<N>) mirrors the spec's Release counter: update-spec.sh
+# bumps it on every rebuild resync, so re-uploading fixed bytes yields
+# <ver>~ppa2~<series>1 instead of a duplicate Launchpad rejects.
+PPA_REV="$(sed -nE 's/^Release:[[:space:]]+([0-9]+).*/\1/p' "${REPO_ROOT}/grokbot-linux-port.spec" 2>/dev/null || true)"
+PPA_REV="${PPA_REV:-1}"
+
 # Fail fast on re-uploaded bytes under the same NVR — same rationale as spec %prep.
 echo "Verifying sha256 of ${TARBALL} ..." >&2
 ACTUAL_SUM="$(sha256sum "${TARBALL}" | awk '{print $1}')"
@@ -82,16 +88,28 @@ echo "  sha256 OK (${SHA256:0:12}…)" >&2
 if [[ "${OUT_DIR}" != /* ]]; then
   OUT_DIR="${REPO_ROOT}/${OUT_DIR}"
 fi
-# Idempotent: stale series dirs would mix old .changes with new and confuse dput.
-rm -rf "${OUT_DIR}"
+# Idempotent for CI (fresh workspace each run); a stray --out-dir $HOME must
+# fail loudly here, never be wiped.
+if [[ -e "${OUT_DIR}" || -L "${OUT_DIR}" ]]; then
+  if [[ ! -d "${OUT_DIR}" ]] || [[ -n "$(find "${OUT_DIR}" -mindepth 1 -print -quit)" ]]; then
+    echo "error: --out-dir '${OUT_DIR}' exists and is not an empty directory — remove it first" >&2
+    exit 1
+  fi
+fi
 mkdir -p "${OUT_DIR}"
 
 CHANGES_FILES=()
+# Every extracted tree (~143 MB each) dies with the process via this trap —
+# a mid-build failure must not leave them in /tmp.
+WORKDIRS=()
+cleanup_workdirs() { [[ ${#WORKDIRS[@]} -eq 0 ]] || rm -rf "${WORKDIRS[@]}"; }
+trap cleanup_workdirs EXIT
 
 for SER in "${SERIES[@]}"; do
-  echo "==> Building source package for ${SER} (${VER}~ppa1~${SER}1)" >&2
+  echo "==> Building source package for ${SER} (${VER}~ppa${PPA_REV}~${SER}1)" >&2
 
   WORK="$(mktemp -d -t grokbot-deb-${SER}-XXXXXX)"
+  WORKDIRS+=("${WORK}")
 
   # Extract; tarball roots at Grok_Bot_<ver>_linux_x64 — rename to
   # grokbot-linux-port-<ver> (native Source: name must match directory).
@@ -122,7 +140,7 @@ for SER in "${SERIES[@]}"; do
 3.0 (native)
 FMT
 
-  DEB_VERSION="${VER}~ppa1~${SER}1"
+  DEB_VERSION="${VER}~ppa${PPA_REV}~${SER}1"
   DEB_DATE="$(LC_ALL=C date -R -u)"
 
   cat > "${PKG_DIR}/debian/changelog" <<CHLOG
@@ -296,8 +314,6 @@ PYHELPER
   for ch in "${OUT_SERIES}"/*_source.changes; do
     CHANGES_FILES+=("${ch}")
   done
-
-  rm -rf "${WORK}"
 
   echo "  -> ${OUT_SERIES}/ ($(ls -1 "${OUT_SERIES}" | tr '\n' ' '))" >&2
 done
