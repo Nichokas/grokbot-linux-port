@@ -11,11 +11,6 @@ name: COPR publish
 # repository_dispatch below after its push lands instead. Token lives in
 # COPR_WEBHOOK_TOKEN (UUID from COPR → Integrations → Custom webhook).
 on:
-  push:
-    branches: [main]
-    paths:
-      - grokbot-linux-port.spec
-      - .github/workflows/copr-publish.yml
   workflow_dispatch:
   repository_dispatch:
     types: [copr-rebuild]
