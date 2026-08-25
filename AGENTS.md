@@ -5,7 +5,7 @@
 Packaging repo for the **Grok Bot Linux port** — the official Windows (NSIS)
 desktop app fused with Electron 42.1.0 for Linux, no Wine. This repo holds
 the porting scripts, the CI that detects/builds/releases new upstream
-versions, and the distro packaging (AUR + Fedora/COPR). The app binaries are
+versions, and the distro packaging (AUR + Fedora/COPR + Ubuntu/PPA). The app binaries are
 never committed; they are derived at build time.
 
 ## Layout
@@ -16,11 +16,13 @@ scripts/detect-version.sh        HEAD-probes downloads.cursor.com for new versio
 scripts/port.sh                  wine-less port: 7z-extract NSIS, merge Electron, rebuild native modules -> dist/
 scripts/update-aur.sh            bumps aur/ PKGBUILDs + .SRCINFO (used by CI release job)
 scripts/update-spec.sh           bumps grokbot-linux-port.spec Version/Release/sha256 (used by CI release job)
+scripts/build-deb.sh             assembles Debian source packages per Ubuntu series (native, no network on Launchpad)
 aur/grokbot-linux-port/          AUR package, builds from source (port.sh at build time)
 aur/grokbot-linux-port-bin/      AUR package, prebuilt tarball from GitHub Releases (recommended)
 grokbot-linux-port.spec          RPM spec for COPR — prebuilt variant, mirrors the AUR -bin package
 .github/workflows/auto-update.yml  daily detect -> build -> release -> AUR publish; PR smoke-builds + lint
 .github/workflows/copr-publish.yml POST COPR custom webhook when the spec lands on main
+.github/workflows/ppa-publish.yml  build Debian source packages + dput to Launchpad PPA per series
 ```
 
 ## Packaging flows
@@ -35,6 +37,20 @@ grokbot-linux-port.spec          RPM spec for COPR — prebuilt variant, mirrors
   (`--bump-release`), fresh versions reset it to 1. After the spec bump is
   pushed to main, `copr-publish.yml` POSTs COPR's custom webhook. Set repo
   secret `COPR_WEBHOOK_TOKEN` to the UUID from COPR → Integrations.
+- **Ubuntu/PPA**: `build-deb.sh` generates native Debian source packages
+  (`3.0 (native)`) with the release tarball as the entire source — Launchpad
+  builders have no network, so every byte must ship inside the source package.
+  - Target series: **noble (24.04)** and **resolute (26.04)** only.
+  - Per-series versioning: `<ver>~ppa1~<serie>1` (e.g. `0.25.0~ppa1~noble1`).
+  - Static deps with t64 names (`libgtk-3-0t64 | libgtk-3-0` etc.); no
+    `dpkg-shlibdeps` — the builder cannot resolve dynamically.
+  - GPG signing required: the `PPA_GPG_PRIVATE_KEY` secret (armored key, no
+    passphrase, registered in Launchpad) signs `.dsc`/`.changes`; unsigned
+    uploads are rejected. `ppa-publish.yml` runs `dput
+    ppa:nichito/grokbot-linux-port <series>/*_source.changes` with one retry.
+  - Hook-up: `auto-update.yml` fires a `ppa-rebuild` repository_dispatch after
+    the spec bump lands on the default branch (same reason as `copr-rebuild`
+    — GITHUB_TOKEN pushes suppress push events).
 - The spec's `%prep` re-verifies the tarball sha256 so a release re-upload
   fails the RPM build instead of shipping changed bytes under the same NVR.
 
@@ -51,6 +67,13 @@ rpm -qpl --dump /tmp/rpm/RPMS/x86_64/*.rpm | grep chrome-sandbox   # must be 010
 
 # update-spec.sh dry runs (idempotent no-op when already in sync)
 bash scripts/update-spec.sh --sum <sha256> $(cat VERSION)
+
+# Debian source package (PPA): builds against the release tarball, no network in Launchpad
+# Requires debhelper + devscripts on the host
+curl -fSL -o /tmp/Grok_Bot_$(cat VERSION)_linux_x64.tar.gz \
+  https://github.com/Nichokas/grokbot-linux-port/releases/download/v$(cat VERSION)/Grok_Bot_$(cat VERSION)_linux_x64.tar.gz
+bash scripts/build-deb.sh --tarball /tmp/Grok_Bot_$(cat VERSION)_linux_x64.tar.gz --sha256 $(sha256sum /tmp/Grok_Bot_$(cat VERSION)_linux_x64.tar.gz | awk '{print $1}') --series noble --out-dir /tmp/ppa-out
+cat /tmp/ppa-out/noble/*.dsc | head -n 20
 ```
 
 Notes learned the hard way:
