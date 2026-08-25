@@ -19,7 +19,7 @@ scripts/update-spec.sh           bumps grokbot-linux-port.spec Version/Release/s
 aur/grokbot-linux-port/          AUR package, builds from source (port.sh at build time)
 aur/grokbot-linux-port-bin/      AUR package, prebuilt tarball from GitHub Releases (recommended)
 grokbot-linux-port.spec          RPM spec for COPR — prebuilt variant, mirrors the AUR -bin package
-.github/workflows/auto-update.yml  daily detect -> build -> release -> AUR publish; PR smoke-builds + lint
+.github/workflows/auto-update.yml  daily detect -> build -> release -> AUR publish + COPR webhook; PR smoke-builds + lint
 ```
 
 ## Packaging flows
@@ -31,7 +31,9 @@ grokbot-linux-port.spec          RPM spec for COPR — prebuilt variant, mirrors
   repo and runs `rpkg srpm`, which requires `grokbot-linux-port.spec` at the
   repo root (name must match the repo). `update-spec.sh` keeps
   `Version`/`Release`/sha256 in sync; rebuild resyncs bump `Release`
-  (`--bump-release`), fresh versions reset it to 1.
+  (`--bump-release`), fresh versions reset it to 1. After the spec bump is
+  pushed, `copr-publish` POSTs COPR's custom webhook. Set repo secret
+  `COPR_WEBHOOK_TOKEN` to the UUID from COPR → Integrations.
 - The spec's `%prep` re-verifies the tarball sha256 so a release re-upload
   fails the RPM build instead of shipping changed bytes under the same NVR.
 
