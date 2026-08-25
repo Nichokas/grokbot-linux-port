@@ -28,9 +28,11 @@ name: Auto Update
       - "scripts/port.sh"
       - "scripts/detect-version.sh"
       - "scripts/update-spec.sh"
+      - "scripts/build-deb.sh"
       - "grokbot-linux-port.spec"
       - "aur/**"
       - ".github/workflows/auto-update.yml"
+      - ".github/workflows/ppa-publish.yml"
 
 # Least-privilege default; release job elevates contents to write via
 # permissions block.  Top-level permissions are the fallback for any job
@@ -130,9 +132,9 @@ jobs:
           changed="$(git diff --name-only "$base"...HEAD 2>/dev/null || git diff --name-only HEAD~1 2>/dev/null || echo 'scripts/port.sh')"
           echo "Changed files:"
           echo "$changed"
-          if echo "$changed" | grep -qvE '^(aur/|README\.md$|VERSION$)' && echo "$changed" | grep -qE '^(scripts/(port\.sh|detect-version\.sh)|\.github/workflows/auto-update\.yml)'; then
+          if echo "$changed" | grep -qvE '^(aur/|README\.md$|VERSION$)' && echo "$changed" | grep -qE '^(scripts/(port\.sh|detect-version\.sh|build-deb\.sh)|\.github/workflows/(auto-update|ppa-publish)\.yml)'; then
             echo "needed=true" >> "$GITHUB_OUTPUT"
-          elif echo "$changed" | grep -qE '^(scripts/(port\.sh|detect-version\.sh)|\.github/workflows/auto-update\.yml)'; then
+          elif echo "$changed" | grep -qE '^(scripts/(port\.sh|detect-version\.sh|build-deb\.sh)|\.github/workflows/(auto-update|ppa-publish)\.yml)'; then
             echo "needed=true" >> "$GITHUB_OUTPUT"
           else
             echo "AUR/docs-only PR — skipping heavy Linux port build (aur-lint still runs)"
@@ -518,6 +520,67 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/dispatches" \
             -d '{"event_type":"copr-rebuild"}'
+
+      - name: Poke PPA rebuild
+        # Same rationale as COPR: GITHUB_TOKEN pushes suppress the push event
+        # that would otherwise reach ppa-publish.yml, so dispatch it explicitly.
+        # Only when on the default branch, for the same stale-main reason.
+        if: steps.spec-bump.outputs.changed == 'true' && github.ref_name == github.event.repository.default_branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl -fsS -o /dev/null -w "ppa-rebuild dispatch HTTP %{http_code}\n" -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/dispatches" \
+            -d '{"event_type":"ppa-rebuild"}'
+
+  # -----------------------------------------------------------------------
+  # deb-lint — validate Debian source package on PRs
+  #
+  # Mirrors aur-lint/spec-lint: build a stub source package with build-deb.sh
+  # and lint it. The stub tarball is tiny (few KB) and carries the minimal
+  # layout build-deb.sh expects (grok-bot + resources/app.asar + chrome-sandbox);
+  # icon extraction is best-effort so a missing app-icon is fine. lintian
+  # checks are non-fatal (|| warn) while bash -n / missing .changes are fatal.
+  # -----------------------------------------------------------------------
+  deb-lint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Lint Debian source package (stub)
+        run: |
+          set -euo pipefail
+          bash -n scripts/build-deb.sh
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends debhelper devscripts lintian
+          tmp="$(mktemp -d -t deb-lint-XXXXXX)"
+          trap 'rm -rf "${tmp}"' EXIT
+          mkdir -p "${tmp}/Grok_Bot_0.0.1_linux_x64/resources" "${tmp}/Grok_Bot_0.0.1_linux_x64/locales"
+          printf '#!/bin/sh\necho grok-bot stub\n' > "${tmp}/Grok_Bot_0.0.1_linux_x64/grok-bot"
+          chmod +x "${tmp}/Grok_Bot_0.0.1_linux_x64/grok-bot"
+          touch "${tmp}/Grok_Bot_0.0.1_linux_x64/chrome-sandbox"
+          echo "stub" > "${tmp}/Grok_Bot_0.0.1_linux_x64/resources/app.asar"
+          stub="/tmp/Grok_Bot_0.0.1_linux_x64.tar.gz"
+          tar -czf "${stub}" -C "${tmp}" Grok_Bot_0.0.1_linux_x64
+          sum="$(sha256sum "${stub}" | awk '{print $1}')"
+          echo "stub sha256=${sum}"
+          bash scripts/build-deb.sh --tarball "${stub}" --sha256 "${sum}" --series noble --out-dir /tmp/deb-lint-out
+          echo "--- .changes ---"
+          cat /tmp/deb-lint-out/noble/*_source.changes
+          echo "--- .dsc ---"
+          cat /tmp/deb-lint-out/noble/*.dsc
+          # .changes must list the source tarball
+          grep -q "grokbot-linux-port_0.0.1~ppa1~noble1" /tmp/deb-lint-out/noble/*_source.changes
+          grep -q "grokbot-linux-port_0.0.1~ppa1~noble1" /tmp/deb-lint-out/noble/*.dsc
+          # --fail-on error: warnings don't fail the gate, errors do
+          lintian --fail-on error /tmp/deb-lint-out/noble/*_source.changes
 
   # -----------------------------------------------------------------------
   # aur-publish — push PKGBUILD + .SRCINFO to aur.archlinux.org
