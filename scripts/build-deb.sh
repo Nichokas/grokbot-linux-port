@@ -88,13 +88,18 @@ echo "  sha256 OK (${SHA256:0:12}…)" >&2
 if [[ "${OUT_DIR}" != /* ]]; then
   OUT_DIR="${REPO_ROOT}/${OUT_DIR}"
 fi
-# Idempotent for CI (fresh workspace each run); a stray --out-dir $HOME must
-# fail loudly here, never be wiped.
+# Re-run friendly AND safe: clear the out-dir only when every top-level entry
+# is something this script generated; foreign content (--out-dir $HOME) must
+# fail loudly, never be wiped.
 if [[ -e "${OUT_DIR}" || -L "${OUT_DIR}" ]]; then
-  if [[ ! -d "${OUT_DIR}" ]] || [[ -n "$(find "${OUT_DIR}" -mindepth 1 -print -quit)" ]]; then
-    echo "error: --out-dir '${OUT_DIR}' exists and is not an empty directory — remove it first" >&2
-    exit 1
-  fi
+  [[ -d "${OUT_DIR}" ]] || { echo "error: --out-dir '${OUT_DIR}' exists and is not a directory" >&2; exit 1; }
+  while IFS= read -r -d '' entry; do
+    case "$(basename "${entry}")" in
+      noble|resolute|grokbot-linux-port_*) ;;
+      *) echo "error: --out-dir '${OUT_DIR}' contains foreign entry '$(basename "${entry}")' — remove it first" >&2; exit 1 ;;
+    esac
+  done < <(find "${OUT_DIR}" -mindepth 1 -maxdepth 1 -print0)
+  rm -rf "${OUT_DIR}"
 fi
 mkdir -p "${OUT_DIR}"
 
@@ -113,9 +118,10 @@ for SER in "${SERIES[@]}"; do
 
   # Extract; tarball roots at Grok_Bot_<ver>_linux_x64 — rename to
   # grokbot-linux-port-<ver> (native Source: name must match directory).
-  # The tarball name is regex-validated above, so this dir always exists.
+  # Exact-name match so a mislabeled tarball can't package another version's
+  # payload under this filename's DEB_VERSION.
   tar -xzf "${TARBALL}" -C "${WORK}"
-  SRC_TOP="$(find "${WORK}" -maxdepth 1 -type d -name 'Grok_Bot_*_linux_x64' -print -quit)"
+  SRC_TOP="$(find "${WORK}" -maxdepth 1 -type d -name "Grok_Bot_${VER}_linux_x64" -print -quit)"
   if [[ -z "${SRC_TOP}" ]]; then
     echo "error: could not locate extracted top-level dir in ${WORK}" >&2
     ls -R "${WORK}" | head -n 80 >&2
