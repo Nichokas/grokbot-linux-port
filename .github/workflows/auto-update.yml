@@ -494,6 +494,22 @@ jobs:
           fi
           git push origin "HEAD:${GITHUB_REF_NAME:-main}"
 
+      - name: Poke COPR rebuild
+        # GitHub suppresses push events for commits pushed with GITHUB_TOKEN,
+        # so copr-publish.yml's push trigger never sees this automated bump;
+        # fire its repository_dispatch directly instead. Human pushes to main
+        # still reach it through the normal push trigger.
+        if: steps.spec-bump.outputs.changed == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl -fsS -o /dev/null -w "copr-rebuild dispatch HTTP %{http_code}\n" -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/dispatches" \
+            -d '{"event_type":"copr-rebuild"}'
+
   # -----------------------------------------------------------------------
   # aur-publish — push PKGBUILD + .SRCINFO to aur.archlinux.org
   #

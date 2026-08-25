@@ -4,10 +4,12 @@ name: COPR publish
 # lands on main. COPR's rpkg source method will not rebuild until something
 # pokes it; this is the COPR analogue of aur-publish.
 #
-# Push-to-main only: a pull_request must not publish to COPR. The release
-# job in auto-update.yml commits the spec bump and pushes to main, which
-# is what fires this. Token lives in COPR_WEBHOOK_TOKEN (UUID from COPR →
-# Integrations → Custom webhook).
+# Push-to-main only: a pull_request must not publish to COPR. Human pushes
+# to main fire this via `push`; the automated spec bump from the
+# auto-update.yml release job cannot — GitHub suppresses push events for
+# commits pushed with GITHUB_TOKEN — so that job fires the copr-rebuild
+# repository_dispatch below after its push lands instead. Token lives in
+# COPR_WEBHOOK_TOKEN (UUID from COPR → Integrations → Custom webhook).
 on:
   push:
     branches: [main]
@@ -15,6 +17,8 @@ on:
       - grokbot-linux-port.spec
       - .github/workflows/copr-publish.yml
   workflow_dispatch:
+  repository_dispatch:
+    types: [copr-rebuild]
 
 permissions:
   contents: read
