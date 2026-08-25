@@ -150,8 +150,12 @@ fetch_cached() {
   fi
   if [[ -n "${GROKBOT_CACHE_DIR:-}" ]]; then
     mkdir -p "${GROKBOT_CACHE_DIR}"
-    cp "${dest}" "${GROKBOT_CACHE_DIR}/.${name}.tmp"
-    mv "${GROKBOT_CACHE_DIR}/.${name}.tmp" "${cached}"
+    # Writer-unique temp: a shared ".${name}.tmp" would let one job's mv
+    # publish another job's still-in-flight cp as a truncated archive.
+    local tmp
+    tmp="$(mktemp "${GROKBOT_CACHE_DIR}/.${name}.tmp.XXXXXX")"
+    cp "${dest}" "${tmp}"
+    mv -f "${tmp}" "${cached}"
     echo "Cached ${name} ($(du -h "${dest}" | cut -f1)) for future runs" >&2
   fi
 }
