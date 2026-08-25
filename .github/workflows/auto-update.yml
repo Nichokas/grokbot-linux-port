@@ -151,15 +151,17 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Cache Electron binary
+      # Namespace cache volume instead of actions/cache: instant NVMe hits,
+      # no upload/download leg, and no key-busting — entries survive port.sh
+      # edits and Electron bumps instead of being invalidated by hashFiles.
+      # Holds both the Electron linux zip and the win32 installers port.sh
+      # fetches (see GROKBOT_CACHE_DIR in the build step), so PR smoke-builds
+      # stop re-downloading ~250 MB per run.
+      - name: Restore cached downloads (Electron zip + win32 installers)
         if: steps.need_build.outputs.needed == 'true'
-        uses: actions/cache@v4
+        uses: namespacelabs/nscloud-cache-action@v1
         with:
-          path: ~/.cache/electron
-          key: electron-42.1.0-${{ matrix.arch }}-${{ hashFiles('scripts/port.sh') }}
-          restore-keys: |
-            electron-42.1.0-${{ matrix.arch }}-
-            electron-42.1.0-
+          path: ${{ github.workspace }}/.cache/downloads
 
       - name: Install system dependencies
         if: steps.need_build.outputs.needed == 'true'
@@ -191,6 +193,9 @@ jobs:
         env:
           GROK_VERSION: ${{ needs.detect-version.outputs.version }}
           ELECTRON_VERSION: "42.1.0"
+          # Same path nscloud-cache-action persists above; port.sh stores the
+          # win32 installer + Electron zip here and reuses them on later runs.
+          GROKBOT_CACHE_DIR: ${{ github.workspace }}/.cache/downloads
         run: |
           set -euo pipefail
           echo "Building Grok Bot ${GROK_VERSION} for linux-${{ matrix.arch }} (Electron ${ELECTRON_VERSION})"
