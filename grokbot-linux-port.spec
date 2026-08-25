@@ -156,6 +156,8 @@ try:
         path, meta = max(hits, key=lambda item: int(item[1]["size"]))
         fh.seek(8 + header_size + int(meta["offset"]))
         blob = fh.read(int(meta["size"]))
+        if len(blob) != int(meta["size"]):
+            raise SystemExit(f"error: {path} is truncated")
         if blob[:8] != b"\x89PNG\r\n\x1a\n":
             raise SystemExit("not a PNG")
         pathlib.Path(dest).write_bytes(blob)
