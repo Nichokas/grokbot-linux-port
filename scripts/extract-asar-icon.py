@@ -64,7 +64,12 @@ def extract(asar_path: str, dest_path: str) -> None:
 def main() -> None:
     if len(sys.argv) != 3:
         raise SystemExit("usage: extract-asar-icon.py <app.asar> <dest.png>")
-    extract(sys.argv[1], sys.argv[2])
+    # Best-effort helper: callers print their own warn and carry on, so any
+    # malformed-asar / IO failure must stay a one-line error, not a traceback.
+    try:
+        extract(sys.argv[1], sys.argv[2])
+    except Exception as exc:
+        raise SystemExit(f"error: {exc}")
 
 
 if __name__ == "__main__":

@@ -109,26 +109,31 @@ def walk(node, prefix=""):
         else:
             yield path, meta
 
-asar, dest = sys.argv[1], sys.argv[2]
-with open(asar, "rb") as fh:
-    if struct.unpack("<I", fh.read(4))[0] != 4:
-        raise SystemExit("bad asar pickle")
-    header_size = struct.unpack("<I", fh.read(4))[0]
-    header_pickle = fh.read(header_size)
-    str_len = struct.unpack_from("<I", header_pickle, 4)[0]
-    header = json.loads(header_pickle[8:8 + str_len])
-    hits = [
-        (p, m) for p, m in walk(header)
-        if p.rsplit("/", 1)[-1].startswith("app-icon") and p.endswith(".png") and "offset" in m
-    ]
-    if not hits:
-        raise SystemExit("no app-icon*.png in asar")
-    path, meta = max(hits, key=lambda item: int(item[1]["size"]))
-    fh.seek(8 + header_size + int(meta["offset"]))
-    blob = fh.read(int(meta["size"]))
-    if blob[:8] != b"\x89PNG\r\n\x1a\n":
-        raise SystemExit("not a PNG")
-    pathlib.Path(dest).write_bytes(blob)
+# Best-effort extraction: callers warn and carry on, so keep failures as
+# one-line errors instead of tracebacks.
+try:
+    asar, dest = sys.argv[1], sys.argv[2]
+    with open(asar, "rb") as fh:
+        if struct.unpack("<I", fh.read(4))[0] != 4:
+            raise SystemExit("bad asar pickle")
+        header_size = struct.unpack("<I", fh.read(4))[0]
+        header_pickle = fh.read(header_size)
+        str_len = struct.unpack_from("<I", header_pickle, 4)[0]
+        header = json.loads(header_pickle[8:8 + str_len])
+        hits = [
+            (p, m) for p, m in walk(header)
+            if p.rsplit("/", 1)[-1].startswith("app-icon") and p.endswith(".png") and "offset" in m
+        ]
+        if not hits:
+            raise SystemExit("no app-icon*.png in asar")
+        path, meta = max(hits, key=lambda item: int(item[1]["size"]))
+        fh.seek(8 + header_size + int(meta["offset"]))
+        blob = fh.read(int(meta["size"]))
+        if blob[:8] != b"\x89PNG\r\n\x1a\n":
+            raise SystemExit("not a PNG")
+        pathlib.Path(dest).write_bytes(blob)
+except Exception as exc:
+    raise SystemExit(f"error: {exc}")
 PY
     then
       install -Dm644 "${extracted}" "${icon_dest}"
