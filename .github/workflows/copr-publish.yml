@@ -25,7 +25,7 @@ permissions:
 
 jobs:
   copr-publish:
-    runs-on: namespace-profile-grokbot
+    runs-on: namespace-profile-grokbot-lite
     steps:
       - name: Trigger COPR rebuild
         env:
