@@ -281,6 +281,11 @@ jobs:
           dnf install -y rpm-build rpmdevtools >/dev/null
           bash -n scripts/update-spec.sh
           mkdir -p /tmp/rpmlint/SOURCES
+          # rpmbuild -bs exige que Source0 exista aunque solo queramos
+          # validar el spec; en CI no descargamos el tarball real (250 MB),
+          # basta un fichero vacío con el nombre que espera %{version}.
+          ver="$(sed -n 's/^Version:[[:space:]]*//p' grokbot-linux-port.spec | tr -d '[:space:]')"
+          touch "/tmp/rpmlint/SOURCES/Grok_Bot_${ver}_linux_x64.tar.gz"
           rpmbuild -bs --define "_topdir /tmp/rpmlint" grokbot-linux-port.spec
           if command -v rpmlint >/dev/null 2>&1; then
             rpmlint grokbot-linux-port.spec || echo "  (rpmlint warnings — non-fatal)"
