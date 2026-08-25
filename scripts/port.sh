@@ -129,6 +129,37 @@ download_with_retry() {
     -o "${dest}" "${url}"
 }
 
+# fetch_cached — download_with_retry backed by GROKBOT_CACHE_DIR (CI points it
+# at a Namespace cache volume): PR smoke builds and dispatch rebuilds skip the
+# multi-hundred-MB win32/Electron fetches. Cache population lands via atomic
+# rename so a concurrent job can never observe a torn copy.
+fetch_cached() {
+  local url="$1" dest="$2"
+  local name cached
+  name="$(basename "${dest}")"
+  if [[ -n "${GROKBOT_CACHE_DIR:-}" ]]; then
+    cached="${GROKBOT_CACHE_DIR}/${name}"
+    if [[ -s "${cached}" ]]; then
+      echo "Using cached ${name} ($(du -h "${cached}" | cut -f1))" >&2
+      cp "${cached}" "${dest}"
+      return 0
+    fi
+  fi
+  if ! download_with_retry "${url}" "${dest}"; then
+    return 1
+  fi
+  if [[ -n "${GROKBOT_CACHE_DIR:-}" ]]; then
+    mkdir -p "${GROKBOT_CACHE_DIR}"
+    # Writer-unique temp: a shared ".${name}.tmp" would let one job's mv
+    # publish another job's still-in-flight cp as a truncated archive.
+    local tmp
+    tmp="$(mktemp "${GROKBOT_CACHE_DIR}/.${name}.tmp.XXXXXX")"
+    cp "${dest}" "${tmp}"
+    mv -f "${tmp}" "${cached}"
+    echo "Cached ${name} ($(du -h "${dest}" | cut -f1)) for future runs" >&2
+  fi
+}
+
 main() {
   parse_args "$@"
   check_prereqs
@@ -157,7 +188,7 @@ main() {
   win32_url="$(printf "${WIN32_URL_TEMPLATE}" "${GROK_VERSION}" "${GROK_VERSION}")"
   installer_path="${workdir}/Grok_Bot_${GROK_VERSION}_Setup.exe"
 
-  if ! download_with_retry "${win32_url}" "${installer_path}"; then
+  if ! fetch_cached "${win32_url}" "${installer_path}"; then
     echo "warn: win32 installer download failed for ${GROK_VERSION}" >&2
     # Opportunistic darwin fallback — useful to distinguish propagation delay
     # from genuine non-existence when diagnosing failures.
@@ -260,7 +291,7 @@ main() {
   electron_url="$(printf "${ELECTRON_URL_TEMPLATE}" "${ELECTRON_VERSION}" "${ELECTRON_VERSION}")"
   electron_zip="${workdir}/electron-v${ELECTRON_VERSION}-linux-x64.zip"
 
-  download_with_retry "${electron_url}" "${electron_zip}"
+  fetch_cached "${electron_url}" "${electron_zip}"
   echo "Fetched Electron ${ELECTRON_VERSION} for linux-x64" >&2
 
   electron_dir="${workdir}/electron"

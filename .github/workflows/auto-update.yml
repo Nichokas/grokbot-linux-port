@@ -54,7 +54,7 @@ jobs:
   # directly and treated as authoritative irrespective of the candidate set.
   # -----------------------------------------------------------------------
   detect-version:
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-grokbot-lite
     permissions:
       contents: read
     outputs:
@@ -109,7 +109,7 @@ jobs:
         # To enable arm64, extend to [x64, arm64] and add a conditional
         # electron arch mapping inside the build step (x64 -> x64, arm64 ->
         # arm64) and adjust the Electron download URL accordingly.
-    runs-on: ubuntu-22.04
+    runs-on: namespace-profile-grokbot
     permissions:
       contents: read
     steps:
@@ -151,15 +151,17 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Cache Electron binary
+      # Namespace cache volume instead of actions/cache: instant NVMe hits,
+      # no upload/download leg, and no key-busting — entries survive port.sh
+      # edits and Electron bumps instead of being invalidated by hashFiles.
+      # Holds both the Electron linux zip and the win32 installers port.sh
+      # fetches (see GROKBOT_CACHE_DIR in the build step), so PR smoke-builds
+      # stop re-downloading ~250 MB per run.
+      - name: Restore cached downloads (Electron zip + win32 installers)
         if: steps.need_build.outputs.needed == 'true'
-        uses: actions/cache@v4
+        uses: namespacelabs/nscloud-cache-action@v1
         with:
-          path: ~/.cache/electron
-          key: electron-42.1.0-${{ matrix.arch }}-${{ hashFiles('scripts/port.sh') }}
-          restore-keys: |
-            electron-42.1.0-${{ matrix.arch }}-
-            electron-42.1.0-
+          path: ${{ github.workspace }}/.cache/downloads
 
       - name: Install system dependencies
         if: steps.need_build.outputs.needed == 'true'
@@ -191,6 +193,9 @@ jobs:
         env:
           GROK_VERSION: ${{ needs.detect-version.outputs.version }}
           ELECTRON_VERSION: "42.1.0"
+          # Same path nscloud-cache-action persists above; port.sh stores the
+          # win32 installer + Electron zip here and reuses them on later runs.
+          GROKBOT_CACHE_DIR: ${{ github.workspace }}/.cache/downloads
         run: |
           set -euo pipefail
           echo "Building Grok Bot ${GROK_VERSION} for linux-${{ matrix.arch }} (Electron ${ELECTRON_VERSION})"
@@ -219,7 +224,7 @@ jobs:
   # -----------------------------------------------------------------------
   aur-lint:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-grokbot-lite
     container: archlinux:base-devel
     permissions:
       contents: read
@@ -267,7 +272,7 @@ jobs:
   # -----------------------------------------------------------------------
   spec-lint:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-grokbot-lite
     container: fedora:latest
     permissions:
       contents: read
@@ -306,7 +311,7 @@ jobs:
     # existing release and resyncs the AUR -bin checksum, without touching
     # VERSION or creating a new tag.
     if: (needs.detect-version.outputs.is_new == 'true' || needs.detect-version.outputs.rebuild == 'true') && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-grokbot-lite
     permissions:
       contents: write
     # surfaced so aur-publish can skip runs where the aur/ tree did not move.
@@ -530,7 +535,7 @@ jobs:
     needs: [release]
     # Only publish when the release changed the AUR tree, and never from a PR.
     if: needs.release.outputs.aur_changed == 'true' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-grokbot-lite
     permissions:
       contents: read
     steps:
