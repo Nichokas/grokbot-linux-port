@@ -54,7 +54,7 @@ jobs:
   # directly and treated as authoritative irrespective of the candidate set.
   # -----------------------------------------------------------------------
   detect-version:
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-grokbot
     permissions:
       contents: read
     outputs:
@@ -109,7 +109,7 @@ jobs:
         # To enable arm64, extend to [x64, arm64] and add a conditional
         # electron arch mapping inside the build step (x64 -> x64, arm64 ->
         # arm64) and adjust the Electron download URL accordingly.
-    runs-on: ubuntu-22.04
+    runs-on: namespace-profile-grokbot
     permissions:
       contents: read
     steps:
@@ -219,7 +219,7 @@ jobs:
   # -----------------------------------------------------------------------
   aur-lint:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-grokbot
     container: archlinux:base-devel
     permissions:
       contents: read
@@ -267,7 +267,7 @@ jobs:
   # -----------------------------------------------------------------------
   spec-lint:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-grokbot
     container: fedora:latest
     permissions:
       contents: read
@@ -306,7 +306,7 @@ jobs:
     # existing release and resyncs the AUR -bin checksum, without touching
     # VERSION or creating a new tag.
     if: (needs.detect-version.outputs.is_new == 'true' || needs.detect-version.outputs.rebuild == 'true') && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-grokbot
     permissions:
       contents: write
     # surfaced so aur-publish can skip runs where the aur/ tree did not move.
@@ -530,7 +530,7 @@ jobs:
     needs: [release]
     # Only publish when the release changed the AUR tree, and never from a PR.
     if: needs.release.outputs.aur_changed == 'true' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-grokbot
     permissions:
       contents: read
     steps:
