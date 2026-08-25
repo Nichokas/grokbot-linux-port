@@ -576,9 +576,10 @@ jobs:
           cat /tmp/deb-lint-out/noble/*_source.changes
           echo "--- .dsc ---"
           cat /tmp/deb-lint-out/noble/*.dsc
-          # .changes must list the source tarball
-          grep -q "grokbot-linux-port_0.0.1~ppa1~noble1" /tmp/deb-lint-out/noble/*_source.changes
-          grep -q "grokbot-linux-port_0.0.1~ppa1~noble1" /tmp/deb-lint-out/noble/*.dsc
+          # .changes must list the source tarball (revision-agnostic: ~ppa<N>
+          # mirrors the spec's Release counter, so don't pin it here)
+          grep -q "grokbot-linux-port_0.0.1~ppa[0-9]*~noble1" /tmp/deb-lint-out/noble/*_source.changes
+          grep -q "grokbot-linux-port_0.0.1~ppa[0-9]*~noble1" /tmp/deb-lint-out/noble/*.dsc
           # --fail-on error: warnings don't fail the gate, errors do
           lintian --fail-on error /tmp/deb-lint-out/noble/*_source.changes
 

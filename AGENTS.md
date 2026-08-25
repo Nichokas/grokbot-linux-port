@@ -41,7 +41,10 @@ grokbot-linux-port.spec          RPM spec for COPR — prebuilt variant, mirrors
   (`3.0 (native)`) with the release tarball as the entire source — Launchpad
   builders have no network, so every byte must ship inside the source package.
   - Target series: **noble (24.04)** and **resolute (26.04)** only.
-  - Per-series versioning: `<ver>~ppa1~<serie>1` (e.g. `0.25.0~ppa1~noble1`).
+  - Per-series versioning: `<ver>~ppa<N>~<series>1`, where N mirrors the
+    spec's `Release:` counter (update-spec.sh bumps it on rebuild resyncs),
+    so re-uploaded bytes get a fresh Debian version instead of the duplicate
+    Launchpad rejects.
   - Static deps with t64 names (`libgtk-3-0t64 | libgtk-3-0` etc.); no
     `dpkg-shlibdeps` — the builder cannot resolve dynamically.
   - GPG signing required: the `PPA_GPG_PRIVATE_KEY` secret (armored key, no
