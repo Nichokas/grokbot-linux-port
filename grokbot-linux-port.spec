@@ -10,8 +10,8 @@
 # `rpkg srpm`, which expects this spec at the repository root.
 
 Name:           grokbot-linux-port
-Version:        0.25.0
-Release:        2%{?dist}
+Version:        0.27.0
+Release:        1%{?dist}
 Summary:        Grok Bot desktop — wine-less Linux port (prebuilt tarball)
 
 # Upstream EULA lives inside resources/app.asar; see the installed LICENSE.
@@ -69,7 +69,7 @@ the grokbot-linux-port CI.
 # Belt and braces: the sha256 is also what Source0's URL pins, but a release
 # re-upload (CI rebuilds non-deterministic bytes) must fail the RPM build
 # loudly instead of shipping changed content under the same Version-Release.
-echo "f4405f7ee46d91cc76e9b09bb3980673c7ddef01fb22b67f0c8007d02327fe85  %{_sourcedir}/Grok_Bot_%{version}_linux_x64.tar.gz" | sha256sum -c -
+echo "4302bd55c2350c33c551e58a7bdb7863b6bcfaf127ea79334ec0be242dcdbbf7  %{_sourcedir}/Grok_Bot_%{version}_linux_x64.tar.gz" | sha256sum -c -
 
 # The tarball keeps NSIS-derived restrictive modes (drwx------ on
 # app.asar.unpacked); normalise so the installed tree is world-readable,
@@ -192,6 +192,9 @@ fi
 %{_bindir}/grokbot
 
 %changelog
+* Wed Aug 26 2026 Nichokas <nichokas@users.noreply.github.com> - 0.27.0-1
+- Sync with upstream release v0.27.0 (tarball sha256 4302bd55c2350c33c551e58a7bdb7863b6bcfaf127ea79334ec0be242dcdbbf7).
+
 * Tue Aug 25 2026 Nichokas <nichokas@users.noreply.github.com> - 0.25.0-2
 - Extract grok-bot desktop icon from packed app.asar when no loose PNG is present.
 
