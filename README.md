@@ -23,6 +23,14 @@ sudo dnf copr enable nichokas/grokbot-linux-port
 sudo dnf install grokbot-linux-port
 ```
 
+**Ubuntu (PPA):**
+
+```bash
+sudo add-apt-repository ppa:nichito/grokbot-linux-port
+sudo apt update
+sudo apt install grokbot-linux-port
+```
+
 **Tarball (any distro):** download `Grok_Bot_<ver>_linux_x64.tar.gz` from [Releases](https://github.com/Nichokas/grokbot-linux-port/releases) and:
 
 ```bash
