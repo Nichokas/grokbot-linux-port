@@ -32,9 +32,28 @@ NATIVE_MODULES=(
   "whichlang-node"
 )
 
+# Target architecture of the produced Linux artefacts.
+#
+# The win32 NSIS payload is architecture-independent JavaScript; only the
+# Electron runtime and the six native modules are arch-specific. TARGET_ARCH
+# uses Electron/npm naming (x64|arm64) and drives the Electron download, the
+# napi-rs triples (...linux-<arch>-gnu.node), the prebuilds/ directory names
+# and the artefact filenames. PKG_ARCH is the kernel/AppImage spelling of the
+# same architecture (x86_64|aarch64).
+detect_target_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) echo "x64" ;;
+    aarch64|arm64) echo "arm64" ;;
+    *) echo "unsupported" ;;
+  esac
+}
+
+TARGET_ARCH="${TARGET_ARCH:-$(detect_target_arch)}"
+PKG_ARCH=""
+
 WIN32_URL_TEMPLATE="https://downloads.cursor.com/grokbot/stable/win32-x64/%s/Grok_Bot_%s_Setup.exe"
 DARWIN_URL_TEMPLATE="https://downloads.cursor.com/grokbot/stable/darwin-x64/%s/Grok_Bot_%s_x64.dmg"
-ELECTRON_URL_TEMPLATE="https://github.com/electron/electron/releases/download/v%s/electron-v%s-linux-x64.zip"
+ELECTRON_URL_TEMPLATE="https://github.com/electron/electron/releases/download/v%s/electron-v%s-linux-%s.zip"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -45,6 +64,7 @@ Usage: $(basename "$0") [options] <version>
 
 Options:
   --electron-version <ver>  Target Electron version (default: ${ELECTRON_VERSION_DEFAULT})
+  --arch <x64|arm64>        Target architecture (default: host, currently ${TARGET_ARCH})
   -h, --help                Show this help
 
 Example:
@@ -58,6 +78,10 @@ parse_args() {
     case "$1" in
       --electron-version)
         ELECTRON_VERSION="${2:?--electron-version requires a value}"
+        shift 2
+        ;;
+      --arch)
+        TARGET_ARCH="${2:?--arch requires a value}"
         shift 2
         ;;
       -h|--help)
@@ -91,6 +115,16 @@ parse_args() {
     echo "error: version '${GROK_VERSION}' does not match x.y.z" >&2
     exit 1
   fi
+
+  case "${TARGET_ARCH}" in
+    x64) PKG_ARCH="x86_64" ;;
+    arm64) PKG_ARCH="aarch64" ;;
+    *)
+      echo "error: unsupported target architecture '${TARGET_ARCH}' (expected x64 or arm64)" >&2
+      echo "hint: pass --arch x64|arm64, or run on an x86_64 / aarch64 host" >&2
+      exit 1
+      ;;
+  esac
 }
 
 check_prereqs() {
@@ -288,11 +322,11 @@ main() {
   # 4. Download Electron Linux binary for the target arch
   # -----------------------------------------------------------------------
   local electron_url electron_zip
-  electron_url="$(printf "${ELECTRON_URL_TEMPLATE}" "${ELECTRON_VERSION}" "${ELECTRON_VERSION}")"
-  electron_zip="${workdir}/electron-v${ELECTRON_VERSION}-linux-x64.zip"
+  electron_url="$(printf "${ELECTRON_URL_TEMPLATE}" "${ELECTRON_VERSION}" "${ELECTRON_VERSION}" "${TARGET_ARCH}")"
+  electron_zip="${workdir}/electron-v${ELECTRON_VERSION}-linux-${TARGET_ARCH}.zip"
 
   fetch_cached "${electron_url}" "${electron_zip}"
-  echo "Fetched Electron ${ELECTRON_VERSION} for linux-x64" >&2
+  echo "Fetched Electron ${ELECTRON_VERSION} for linux-${TARGET_ARCH}" >&2
 
   electron_dir="${workdir}/electron"
   mkdir -p "${electron_dir}"
@@ -303,13 +337,13 @@ main() {
   # 5. Stage the Linux application directory
   #
   # Layout mirrors the Electron Linux distribution:
-  #   Grok_Bot_<ver>_linux_x64/
+  #   Grok_Bot_<ver>_linux_${TARGET_ARCH}/
   #     grok-bot            (electron binary, renamed)
   #     chrome-sandbox
   #     resources/app.asar (+ app.asar.unpacked, locales, *.pak, etc.)
   #     locales/            (top-level locales required by Chromium)
   # -----------------------------------------------------------------------
-  local linux_app_name="Grok_Bot_${GROK_VERSION}_linux_x64"
+  local linux_app_name="Grok_Bot_${GROK_VERSION}_linux_${TARGET_ARCH}"
   local staged="${workdir}/${linux_app_name}"
   mkdir -p "${staged}/resources"
 
@@ -448,7 +482,7 @@ main() {
 
     fetch_better_sqlite_electron_prebuild() {
       local mod_dir="$1"
-      local url="https://github.com/WiseLibs/better-sqlite3/releases/download/v12.11.1/better-sqlite3-v12.11.1-electron-v146-linux-x64.tar.gz"
+      local url="https://github.com/WiseLibs/better-sqlite3/releases/download/v12.11.1/better-sqlite3-v12.11.1-electron-v146-linux-${TARGET_ARCH}.tar.gz"
       local tmp
       tmp="$(mktemp -d -t bs-pre-XXXXXX)"
       echo "  fetching better-sqlite3 electron-v146 prebuild (12.11.1, API-compatible with 12.6.2)" >&2
@@ -543,6 +577,61 @@ PYPATCH
         "${SCRIPT_DIR}/native-stubs/linux-stub.cc" -o "${dest}"
     }
 
+    # The win32 payload ships a stripped node-addon-api (index.js and
+    # package.json only) because that build never compiles anything: every
+    # native module arrives prebuilt. A source rebuild needs the real package
+    # — tree-sitter's binding.gyp references ../node-addon-api/node_addon_api.gyp
+    # — so restore the build files from npm at the vendored version.
+    #
+    # Only non-x64 targets reach this path: on x64 tree-sitter resolves to a
+    # prebuilds/linux-x64 blob from npm and never invokes node-gyp.
+    ensure_node_addon_api_buildable() {
+      local nai_dir="${deps_root}/node-addon-api"
+      [[ -f "${nai_dir}/node_addon_api.gyp" ]] && return 0
+      if [[ ! -d "${nai_dir}" ]]; then
+        echo "  warn: ${nai_dir} absent; leaving the rebuild to resolve node-addon-api itself" >&2
+        return 0
+      fi
+
+      local want="8.5.0"
+      if [[ -f "${nai_dir}/package.json" ]]; then
+        want="$(node -p 'require(process.argv[1]).version' "${nai_dir}/package.json" 2>/dev/null || echo "8.5.0")"
+      fi
+
+      echo "  node-addon-api in the payload is stripped; restoring node-addon-api@${want} build files from npm" >&2
+      local tmp_nai nai_tgz
+      tmp_nai="$(mktemp -d -t nai-XXXXXX)"
+      if ! (cd "$tmp_nai" && npm pack --ignore-scripts "node-addon-api@${want}" >/dev/null 2>&1); then
+        echo "error: npm pack node-addon-api@${want} failed" >&2
+        rm -rf "$tmp_nai"
+        exit 1
+      fi
+      nai_tgz="$(ls "$tmp_nai"/node-addon-api-*.tgz 2>/dev/null | head -n 1 || true)"
+      mkdir -p "$tmp_nai/ex"
+      tar -xzf "$nai_tgz" -C "$tmp_nai/ex" 2>/dev/null
+      if [[ ! -f "$tmp_nai/ex/package/node_addon_api.gyp" ]]; then
+        echo "error: node_addon_api.gyp missing from the node-addon-api@${want} tarball" >&2
+        rm -rf "$tmp_nai"
+        exit 1
+      fi
+      # Same version as vendored, so this is a strict superset of what is there.
+      cp -a "$tmp_nai/ex/package/." "${nai_dir}/"
+      rm -rf "$tmp_nai"
+      echo "  node-addon-api@${want} build files installed" >&2
+    }
+
+    # Electron 42 ships V8 headers that hard-#error below C++20
+    # ("C++20 or later required." in v8config.h). tree-sitter 0.21.1 pins
+    # -std=c++17 in binding.gyp, so the compile dies on the first V8 header
+    # regardless of architecture. Raise any sub-C++20 pin before building.
+    relax_cxx_standard() {
+      local gyp="$1/binding.gyp"
+      [[ -f "${gyp}" ]] || return 0
+      grep -qE 'c\+\+(11|14|17)' "${gyp}" || return 0
+      echo "  raising binding.gyp C++ standard to C++20 (Electron ${ELECTRON_VERSION} V8 headers require it)" >&2
+      sed -i -E 's/c\+\+(11|14|17)/c++20/g' "${gyp}"
+    }
+
     fix_one_node_module() {
       local name="$1"
       local kind="$2"
@@ -575,37 +664,39 @@ PYPATCH
           fi
           local tgz2
           tgz2="$(ls "$tmp_npm"/*.tgz 2>/dev/null | head -n 1 || true)"
-          # Prefer a linux-x64 prebuilt if the npm package ships one
+          # Prefer a linux-${TARGET_ARCH} prebuilt if the npm package ships one
           local prebuilt=""
           mkdir -p "$tmp_npm/ex"
           tar -xzf "$tgz2" -C "$tmp_npm/ex" 2>/dev/null
           # Remove stale Windows build artefacts (MSVC build/Release) so node-gyp-build
           # prefers the linux prebuild instead of the win32 .node in build/Release.
           rm -rf "${mod_dir}/build"
-          if compgen -G "$tmp_npm/ex/package/prebuilds/linux-x64/*.node" >/dev/null 2>&1; then
-            prebuilt="$(ls "$tmp_npm/ex/package/prebuilds/linux-x64/"*.node 2>/dev/null | head -n 1 || true)"
+          if compgen -G "$tmp_npm/ex/package/prebuilds/linux-${TARGET_ARCH}/*.node" >/dev/null 2>&1; then
+            prebuilt="$(ls "$tmp_npm/ex/package/prebuilds/linux-${TARGET_ARCH}/"*.node 2>/dev/null | head -n 1 || true)"
           fi
           if [[ -n "${prebuilt:-}" && -f "$prebuilt" ]]; then
             echo "  using npm prebuilt $(basename "$prebuilt")" >&2
             # tree-sitter-bash's loader uses node-gyp-build(root) -> build/Release/
-            # but tree-sitter-bash npm also has prebuilds/linux-x64/ — copy into the
+            # but tree-sitter-bash npm also has prebuilds/linux-${TARGET_ARCH}/ — copy into the
             # location the loader actually checks on Linux.
             if [[ "$name" == "tree-sitter-bash" ]]; then
-              local dest_dir="${mod_dir}/prebuilds/linux-x64"
+              local dest_dir="${mod_dir}/prebuilds/linux-${TARGET_ARCH}"
               mkdir -p "$dest_dir"
               cp -f "$prebuilt" "$dest_dir/$(basename "$prebuilt")"
               echo "  installed $(basename "$prebuilt") ($(du -h "$dest_dir/$(basename "$prebuilt")" | cut -f1))" >&2
             else
-              mkdir -p "${mod_dir}/prebuilds/linux-x64"
-              cp -f "$prebuilt" "${mod_dir}/prebuilds/linux-x64/$(basename "$prebuilt")"
+              mkdir -p "${mod_dir}/prebuilds/linux-${TARGET_ARCH}"
+              cp -f "$prebuilt" "${mod_dir}/prebuilds/linux-${TARGET_ARCH}/$(basename "$prebuilt")"
               echo "  installed $(basename "$prebuilt")" >&2
             fi
           else
-            echo "  no linux-x64 prebuild in npm pack for ${name}; rebuilding from npm source" >&2
+            echo "  no linux-${TARGET_ARCH} prebuild in npm pack for ${name}; rebuilding from npm source" >&2
+            ensure_node_addon_api_buildable
             # Replace the stripped vendored dir with the full-source npm copy
             rm -rf "${mod_dir}.orig"
             mv "$mod_dir" "${mod_dir}.orig"
             cp -a "$tmp_npm/ex/package" "$mod_dir"
+            relax_cxx_standard "${mod_dir}"
             # Ensure sibling helpers (node-addon-api etc.) are still reachable
             if ! (NODE_PATH="${deps_root}:${deps_root}/node-addon-api:${NODE_PATH:-}" \
                   npx --yes @electron/rebuild --version "${ELECTRON_VERSION}" --module-dir "${mod_dir}" 2>&1); then
@@ -652,6 +743,7 @@ PYPATCH
             compile_native_stub "${mod_dir}/build/Release/cursor_proclist.node"
           else
             echo "  rebuilding ${name} (node-gyp, --module-dir ${mod_dir})" >&2
+            ensure_node_addon_api_buildable
             if ! (NODE_PATH="${deps_root}:${deps_root}/node-addon-api:${NODE_PATH:-}" \
                   npx --yes @electron/rebuild --version "${ELECTRON_VERSION}" --module-dir "${mod_dir}" 2>&1); then
               if [[ "${GROKBOT_ALLOW_BROKEN_NATIVE:-}" == "1" ]]; then
@@ -665,28 +757,28 @@ PYPATCH
           ;;
 
         napi-whichlang)
-          echo "  fixing ${name}: fetching whichlang-node-linux-x64-gnu@0.2.1 (npm prebuilt)" >&2
+          echo "  fixing ${name}: fetching whichlang-node-linux-${TARGET_ARCH}-gnu@0.2.1 (npm prebuilt)" >&2
           local tmp_pkg
           tmp_pkg="$(mktemp -d -t whichlang-XXXXXX)"
           # --ignore-scripts avoids running its prebuild-install hook; we just need the .node blob
-          if ! (cd "$tmp_pkg" && npm pack --ignore-scripts "whichlang-node-linux-x64-gnu@0.2.1" >/dev/null 2>&1); then
-            echo "error: npm pack whichlang-node-linux-x64-gnu@0.2.1 failed" >&2
+          if ! (cd "$tmp_pkg" && npm pack --ignore-scripts "whichlang-node-linux-${TARGET_ARCH}-gnu@0.2.1" >/dev/null 2>&1); then
+            echo "error: npm pack whichlang-node-linux-${TARGET_ARCH}-gnu@0.2.1 failed" >&2
             rm -rf "$tmp_pkg"
             exit 1
           fi
           local tgz
-          tgz="$(ls "$tmp_pkg"/whichlang-node-linux-x64-gnu-*.tgz 2>/dev/null | head -n 1 || true)"
+          tgz="$(ls "$tmp_pkg"/whichlang-node-linux-${TARGET_ARCH}-gnu-*.tgz 2>/dev/null | head -n 1 || true)"
           mkdir -p "$tmp_pkg/ex"
           tar -xzf "$tgz" -C "$tmp_pkg/ex" 2>/dev/null
-          local linux_node="$tmp_pkg/ex/package/whichlang-node.linux-x64-gnu.node"
+          local linux_node="$tmp_pkg/ex/package/whichlang-node.linux-${TARGET_ARCH}-gnu.node"
           if [[ ! -f "$linux_node" ]]; then
             echo "error: expected $linux_node not found in npm tarball" >&2
             rm -rf "$tmp_pkg"
             exit 1
           fi
           # Keep the win32 blob alongside (harmless) and add the linux one the loader prefers on gnu hosts
-          cp "$linux_node" "${mod_dir}/whichlang-node.linux-x64-gnu.node"
-          # The loader for glibc hosts tries the local file first (whichlang-node.linux-x64-gnu.node)
+          cp "$linux_node" "${mod_dir}/whichlang-node.linux-${TARGET_ARCH}-gnu.node"
+          # The loader for glibc hosts tries the local file first (whichlang-node.linux-${TARGET_ARCH}-gnu.node)
           # before falling back to the npm package — no need to fabricate the package dir.
           echo "  installed $(basename "$linux_node") ($(du -h "$linux_node" | cut -f1))" >&2
           rm -rf "$tmp_pkg"
@@ -694,14 +786,14 @@ PYPATCH
 
         napi-tree-chunk)
           # Private Anysphere crate: dist has no Cargo.toml and npm has no
-          # @anysphere/tree-chunk-napi-linux-x64-gnu tarball. The napi-rs loader
-          # probes tree-chunk-napi.linux-x64-gnu.node first on glibc hosts — a
+          # @anysphere/tree-chunk-napi-linux-${TARGET_ARCH}-gnu tarball. The napi-rs loader
+          # probes tree-chunk-napi.linux-${TARGET_ARCH}-gnu.node first on glibc hosts — a
           # path the win32 tarball never ships — so place the N-API stub there.
           # host-main.cjs requires it unguarded at top level; without the stub
           # the host subprocess dies on spawn ("Cannot find module"), with the
           # stub it starts and only tree-chunk call sites fail.
-          echo "  placing N-API stub at ${name}.linux-x64-gnu.node (no linux crate or prebuild)" >&2
-          compile_native_stub "${mod_dir}/tree-chunk-napi.linux-x64-gnu.node"
+          echo "  placing N-API stub at ${name}.linux-${TARGET_ARCH}-gnu.node (no linux crate or prebuild)" >&2
+          compile_native_stub "${mod_dir}/tree-chunk-napi.linux-${TARGET_ARCH}-gnu.node"
           ;;
 
         *)
@@ -723,15 +815,15 @@ PYPATCH
     if [[ -n "${asar_tmp:-}" && -d "${asar_tmp}/dist/deps" ]]; then
       echo "Mirroring fixed native blobs into app.asar extract..." >&2
       # For rebuilt modules, copy the concrete .node artefacts. For the npm-fetched
-      # whichlang file, the new linux-x64-gnu file is the only new entry.
+      # whichlang file, the new linux-${TARGET_ARCH}-gnu file is the only new entry.
       for rel in \
         "better-sqlite3/build/Release/better_sqlite3.node" \
         "cursor-proclist/build/Release/cursor_proclist.node" \
         "tree-sitter/build/Release/tree_sitter_runtime_binding.node" \
         "tree-sitter-bash/build/Release/tree_sitter_bash_binding.node" \
-        "whichlang-node/whichlang-node.linux-x64-gnu.node" \
-        "whichlang-node/whichlang-node.linux-x64-musl.node" \
-        "@anysphere/tree-chunk-napi/tree-chunk-napi.linux-x64-gnu.node"; do
+        "whichlang-node/whichlang-node.linux-${TARGET_ARCH}-gnu.node" \
+        "whichlang-node/whichlang-node.linux-${TARGET_ARCH}-musl.node" \
+        "@anysphere/tree-chunk-napi/tree-chunk-napi.linux-${TARGET_ARCH}-gnu.node"; do
         if [[ -f "${deps_root}/${rel}" ]]; then
           mkdir -p "${asar_tmp}/dist/deps/$(dirname "$rel")"
           cp -f "${deps_root}/${rel}" "${asar_tmp}/dist/deps/${rel}"
@@ -739,14 +831,14 @@ PYPATCH
       done
       # Tree-sitter native modules are shipped as prebuilds/ after the fix (no
       # build/Release on this branch). Copy any linux prebuilds that now exist.
-      for pre in "${deps_root}/tree-sitter/prebuilds/linux-x64"/*.node "${deps_root}/tree-sitter-bash/prebuilds/linux-x64"/*.node "${deps_root}/tree-sitter/prebuilds"/*.node; do
+      for pre in "${deps_root}/tree-sitter/prebuilds/linux-${TARGET_ARCH}"/*.node "${deps_root}/tree-sitter-bash/prebuilds/linux-${TARGET_ARCH}"/*.node "${deps_root}/tree-sitter/prebuilds"/*.node; do
         [[ -f "$pre" ]] || continue
         rel="${pre#"${deps_root}/"}"
         mkdir -p "${asar_tmp}/dist/deps/$(dirname "$rel")"
         cp -f "$pre" "${asar_tmp}/dist/deps/${rel}"
       done
       # Purge stale Windows build dir from the extracted tree so node-gyp-build
-      # inside the packed asar prefers prebuilds/linux-x64.
+      # inside the packed asar prefers prebuilds/linux-${TARGET_ARCH}.
       rm -rf "${asar_tmp}/dist/deps/tree-sitter/build" "${asar_tmp}/dist/deps/tree-sitter-bash/build"
 
       local asar_cmd
@@ -852,7 +944,7 @@ PYPATCH
   # Best-effort: failures are warned, never fatal to the tarball.
   if command -v mksquashfs >/dev/null 2>&1; then
     echo "Attempting AppImage creation..." >&2
-    local appimage_name="Grok_Bot_${GROK_VERSION}_x86_64.AppImage"
+    local appimage_name="Grok_Bot_${GROK_VERSION}_${PKG_ARCH}.AppImage"
     local appimage_path="${outdir}/${appimage_name}"
     local appdir="${workdir}/AppDir"
 
@@ -922,7 +1014,7 @@ APPRUN_EOF
       if curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \
            --connect-timeout 15 --max-time 300 \
            -o "${appimagetool_bin}" \
-           "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" 2>&1; then
+           "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${PKG_ARCH}.AppImage" 2>&1; then
         chmod +x "${appimagetool_bin}"
         # Extract to avoid FUSE requirement in CI
         if "${appimagetool_bin}" --appimage-extract >/dev/null 2>&1; then
@@ -952,7 +1044,7 @@ APPRUN_EOF
         done
       fi
       # Run from workdir so relative squashfs-root resolves; force arch
-      if ! (cd "${workdir}" 2>/dev/null; ARCH=x86_64 "${at_bin}" "${appdir}" "${appimage_path}" 2>&1); then
+      if ! (cd "${workdir}" 2>/dev/null; ARCH=${PKG_ARCH} "${at_bin}" "${appdir}" "${appimage_path}" 2>&1); then
         echo "warn: appimagetool failed — skipping AppImage" >&2
         rm -f "${appimage_path}" 2>/dev/null || true
       else
