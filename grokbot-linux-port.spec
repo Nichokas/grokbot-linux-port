@@ -18,15 +18,17 @@ Summary:        Grok Bot desktop — wine-less Linux port (prebuilt tarball)
 License:        Proprietary
 URL:            https://github.com/Nichokas/grokbot-linux-port
 Source0:        %{url}/releases/download/v%{version}/Grok_Bot_%{version}_linux_x64.tar.gz
+Source1:        %{url}/releases/download/v%{version}/Grok_Bot_%{version}_linux_arm64.tar.gz
 
-# Prebuilt payload: nothing to strip, and the debuginfo machinery fails on
-# the bundled Electron binaries.
+# The tarball is produced by CI for both linux-x64 and linux-arm64 (see the
+# build matrix in auto-update.yml) and carries prebuilt ELF binaries for the
+# matching arch. The SRPM carries BOTH tarballs in Source0/Source1; each
+# chroot's %setup extracts only the matching one based on _target_arch. This
+# way a single `rpkg srpm` produces an SRPM that COPR can fan out across its
+# x86_64/aarch64 chroots without each needing to resolve the other arch's URL.
+# No ExclusiveArch: the package is arch-dependent on purpose, but it must be
+# buildable on whichever arch the chroot is.
 %global debug_package %{nil}
-
-# The tarball is produced by CI for linux-x64 only (see the build matrix in
-# auto-update.yml) and carries x86_64 ELF binaries, so the RPM is
-# arch-dependent on purpose: it must not be installable on other arches.
-ExclusiveArch:  x86_64
 
 BuildRequires:  coreutils
 BuildRequires:  findutils
@@ -64,12 +66,23 @@ This package installs the prebuilt tarball published on GitHub Releases by
 the grokbot-linux-port CI.
 
 %prep
-%setup -q -n Grok_Bot_%{version}_linux_x64
+# Source0 is x64, Source1 is arm64. Each chroot extracts only its matching
+# tarball via -b N (the other source is left intact in %{_sourcedir}).
+%if "%{_target_arch}" == "aarch64"
+    %setup -q -n Grok_Bot_%{version}_linux_arm64 -b 1
+%else
+    %setup -q -n Grok_Bot_%{version}_linux_x64 -b 0
+%endif
 
-# Belt and braces: the sha256 is also what Source0's URL pins, but a release
-# re-upload (CI rebuilds non-deterministic bytes) must fail the RPM build
-# loudly instead of shipping changed content under the same Version-Release.
-echo "0ed63f0beae1d5a61ec7b1ebb0d1d1931522c1c28ced0532c451cf4f294b3912  %{_sourcedir}/Grok_Bot_%{version}_linux_x64.tar.gz" | sha256sum -c -
+# Belt and braces: the sha256 is also what Source{0,1}'s URL pins, but a
+# release re-upload (CI rebuilds non-deterministic bytes) must fail the RPM
+# build loudly instead of shipping changed content under the same
+# Version-Release. Pick the sum that matches the chroot's arch.
+%if "%{_target_arch}" == "aarch64"
+    echo "ARM64_SUM_PLACEHOLDER  %{_sourcedir}/Grok_Bot_%{version}_linux_arm64.tar.gz" | sha256sum -c -
+%else
+    echo "0ed63f0beae1d5a61ec7b1ebb0d1d1931522c1c28ced0532c451cf4f294b3912  %{_sourcedir}/Grok_Bot_%{version}_linux_x64.tar.gz" | sha256sum -c -
+%endif
 
 # The tarball keeps NSIS-derived restrictive modes (drwx------ on
 # app.asar.unpacked); normalise so the installed tree is world-readable,
