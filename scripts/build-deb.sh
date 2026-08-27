@@ -301,6 +301,13 @@ PYHELPER
   popd >/dev/null
 
   OUT_SERIES="${OUT_DIR}/${SER}"
+  # Wipe stale files from a previous run of the same series so CHANGES_FILES
+  # only collects what this invocation produces. The OUT_DIR wipe above
+  # handles the cross-run case, but in-script re-runs of a single series
+  # (e.g. when adding arm64 support) would otherwise leave obsolete
+  # .dsc/.changes/.tar.* in place; dput would then get pointed at the
+  # wrong artefacts and Launchpad would reject the duplicate.
+  rm -rf "${OUT_SERIES}"
   mkdir -p "${OUT_SERIES}"
   shopt -s nullglob
   # Native package leaves .dsc, .tar.gz/.tar.xz, _source.changes, .buildinfo in WORK
