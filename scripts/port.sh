@@ -827,6 +827,12 @@ PYPATCH
     # have an extracted copy to repack. app.asar's natives are otherwise stale.
     if [[ -n "${asar_tmp:-}" && -d "${asar_tmp}/dist/deps" ]]; then
       echo "Mirroring fixed native blobs into app.asar extract..." >&2
+      # Drop the win32 build/Release dirs the installer shipped before copying
+      # anything in. node-gyp-build checks build/Release ahead of prebuilds/, so
+      # a leftover PE there outranks every linux artefact below, and the app
+      # requires these through app.asar (its bundled main puts dist/deps on
+      # NODE_PATH), not through app.asar.unpacked.
+      rm -rf "${asar_tmp}/dist/deps/tree-sitter/build" "${asar_tmp}/dist/deps/tree-sitter-bash/build"
       # For rebuilt modules, copy the concrete .node artefacts. For the npm-fetched
       # whichlang file, the new linux-${TARGET_ARCH}-gnu file is the only new entry.
       for rel in \
@@ -842,17 +848,16 @@ PYPATCH
           cp -f "${deps_root}/${rel}" "${asar_tmp}/dist/deps/${rel}"
         fi
       done
-      # Tree-sitter native modules are shipped as prebuilds/ after the fix (no
-      # build/Release on this branch). Copy any linux prebuilds that now exist.
+      # On x64 both tree-sitter modules take an npm prebuild, so the loadable
+      # copy is prebuilds/linux-x64 and build/Release stays empty. On arm64 npm
+      # ships no prebuild, the modules are rebuilt from source into
+      # build/Release above, and that copy is the only loadable one.
       for pre in "${deps_root}/tree-sitter/prebuilds/linux-${TARGET_ARCH}"/*.node "${deps_root}/tree-sitter-bash/prebuilds/linux-${TARGET_ARCH}"/*.node "${deps_root}/tree-sitter/prebuilds"/*.node; do
         [[ -f "$pre" ]] || continue
         rel="${pre#"${deps_root}/"}"
         mkdir -p "${asar_tmp}/dist/deps/$(dirname "$rel")"
         cp -f "$pre" "${asar_tmp}/dist/deps/${rel}"
       done
-      # Purge stale Windows build dir from the extracted tree so node-gyp-build
-      # inside the packed asar prefers prebuilds/linux-${TARGET_ARCH}.
-      rm -rf "${asar_tmp}/dist/deps/tree-sitter/build" "${asar_tmp}/dist/deps/tree-sitter-bash/build"
 
       local asar_cmd
       if command -v asar >/dev/null 2>&1; then
