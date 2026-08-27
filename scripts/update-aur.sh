@@ -79,6 +79,19 @@ for v in BIN_SUM BIN_SUM_X64 BIN_SUM_ARM64; do
   fi
 done
 
+# --bin-only exists to skip the source-tarball fetch (the upstream tag
+# archive is stable across rebuilds; only the prebuilt bytes change). It
+# must still receive a sum to validate, otherwise the bump would be silent
+# and the AUR tree would drift. This guard fails loudly: a caller that
+# forgot --bin-sum-* / --bin-sum wants the previous "exit 0" behaviour
+# turned into a hard error.
+if [[ "${BIN_ONLY}" == "true" ]]; then
+  if [[ -z "${BIN_SUM_X64}" && -z "${BIN_SUM_ARM64}" && -z "${BIN_SUM}" ]]; then
+    echo "error: --bin-only requires --bin-sum-x64 and/or --bin-sum-arm64 (or legacy --bin-sum)" >&2
+    exit 1
+  fi
+fi
+
 update_one() {
   local dir="$1" expect_src="$2" sum="$3" bump_pkgrel="${4:-false}"
   # Per-arch sums: set by the caller via env when present; only slots with
