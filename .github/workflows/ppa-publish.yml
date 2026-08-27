@@ -32,8 +32,23 @@ jobs:
           echo "VERSION=${ver}"
           tarball="Grok_Bot_${ver}_linux_x64.tar.gz"
           mkdir -p dist
-          gh release download "v${ver}" --pattern "${tarball}" --dir dist --clobber
-          ls -lh dist/
+          # Distinguish "asset missing" (skip the leg) from a real download
+          # failure (propagate as an error). A blanket `gh release download`
+          # failure would otherwise set PPA_SKIP=1 and silently mask a real
+          # bug; here we probe the release's asset list first so a missing
+          # asset is a clean skip while an auth/network blip still errors.
+          if gh release view "v${ver}" --json assets --jq \
+              ".assets[] | select(.name == \"${tarball}\") | .name" \
+              | grep -qx "${tarball}"; then
+            if ! gh release download "v${ver}" --pattern "${tarball}" --dir dist --clobber; then
+              echo "::error::failed to download ${tarball} from release v${ver}" >&2
+              exit 1
+            fi
+          else
+            echo "::warning::${tarball} not in release v${ver} — skipping (build job may not have published this arch)"
+            echo "PPA_SKIP=1" >> "${GITHUB_ENV}"
+          fi
+          ls -lh dist/ || true
 
       - name: Install Debian packaging tools
         run: |
