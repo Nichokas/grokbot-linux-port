@@ -64,7 +64,7 @@ Usage: $(basename "$0") [options] <version>
 
 Options:
   --electron-version <ver>  Target Electron version (default: ${ELECTRON_VERSION_DEFAULT})
-  --arch <x64|arm64>        Target architecture (default: host, currently ${TARGET_ARCH})
+  --arch <x64|arm64>        Target architecture; must match the host (default: ${TARGET_ARCH})
   -h, --help                Show this help
 
 Example:
@@ -125,6 +125,18 @@ parse_args() {
       exit 1
       ;;
   esac
+
+  # --arch picks the Electron download and the artefact names, but the native
+  # work always follows the host: compile_native_stub calls the host g++, and
+  # @electron/rebuild runs without --arch. A mismatched target wraps an
+  # ${TARGET_ARCH} Electron runtime around host .node files, which dlopen
+  # rejects at startup. Refuse it — this script builds natively.
+  local host_arch
+  host_arch="$(detect_target_arch)"
+  if [[ "${TARGET_ARCH}" != "${host_arch}" ]]; then
+    echo "error: --arch ${TARGET_ARCH} does not match host $(uname -m); this script builds natively" >&2
+    exit 1
+  fi
 }
 
 check_prereqs() {
@@ -208,6 +220,7 @@ main() {
 
   echo "Grok Bot version  : ${GROK_VERSION}" >&2
   echo "Electron version  : ${ELECTRON_VERSION}" >&2
+  echo "Target arch       : ${TARGET_ARCH} (${PKG_ARCH})" >&2
   echo "Work directory    : ${workdir}" >&2
   echo "Output directory  : ${outdir}" >&2
 
@@ -627,9 +640,9 @@ PYPATCH
     relax_cxx_standard() {
       local gyp="$1/binding.gyp"
       [[ -f "${gyp}" ]] || return 0
-      grep -qE 'c\+\+(11|14|17)' "${gyp}" || return 0
+      grep -qE -- '-std=c\+\+(11|14|17)' "${gyp}" || return 0
       echo "  raising binding.gyp C++ standard to C++20 (Electron ${ELECTRON_VERSION} V8 headers require it)" >&2
-      sed -i -E 's/c\+\+(11|14|17)/c++20/g' "${gyp}"
+      sed -i -E 's/-std=c\+\+(11|14|17)/-std=c++20/g' "${gyp}"
     }
 
     fix_one_node_module() {
