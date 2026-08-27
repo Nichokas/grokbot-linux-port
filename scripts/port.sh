@@ -755,6 +755,12 @@ PYPATCH
       else
         asar_cmd="npx --yes @electron/asar"
       fi
+      # Upstream is win32/darwin. Without these asar edits the Linux
+      # coordinator dies on MessagePort close and the renderer stays on
+      # first-run phase "checking" (blank window) when EnsureSandBox hangs.
+      echo "Applying Linux runtime patches to app.asar extract..." >&2
+      python3 "${SCRIPT_DIR}/patch-linux-runtime.py" "${asar_tmp}"
+
       echo "Repacking app.asar..." >&2
       # shellcheck disable=SC2086
       if ! ${asar_cmd} pack "${asar_tmp}" "${staged}/resources/app.asar" 2>&1; then
