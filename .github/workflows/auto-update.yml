@@ -319,7 +319,8 @@ jobs:
     # surfaced so aur-publish can skip runs where the aur/ tree did not move.
     outputs:
       version: ${{ needs.detect-version.outputs.version }}
-      tarball_sum: ${{ steps.artifacts.outputs.tarball_sum }}
+      tarball_sum_x64: ${{ steps.artifacts.outputs.tarball_sum_x64 }}
+      tarball_sum_arm64: ${{ steps.artifacts.outputs.tarball_sum_arm64 }}
       aur_changed: ${{ steps.aur-bump.outputs.changed }}
       spec_changed: ${{ steps.spec-bump.outputs.changed }}
     steps:
@@ -344,7 +345,7 @@ jobs:
           ls -lh dist/ || true
           find dist -type f -exec ls -lh {} \;
 
-      - name: Hash release tarball
+      - name: Hash release tarballs
         id: artifacts
         env:
           VER: ${{ needs.detect-version.outputs.version }}
@@ -353,11 +354,21 @@ jobs:
           # Hash the exact bytes this job will upload. update-aur.sh must not
           # re-hash the published URL: GitHub's asset CDN races propagation of
           # freshly uploaded assets, and a re-upload leaves the old sum behind.
-          tarball="dist/Grok_Bot_${VER}_linux_x64.tar.gz"
-          [[ -f "${tarball}" ]] || { echo "::error::expected tarball ${tarball} missing" >&2; exit 1; }
-          sum="$(sha256sum "${tarball}" | awk '{print $1}')"
-          echo "tarball_sum=${sum}" >> "${GITHUB_OUTPUT}"
-          echo "sha256(${tarball}) = ${sum}"
+          # Each arch is optional — when the build matrix didn't publish a
+          # tarball for an arch, the corresponding output stays empty and the
+          # AUR/spec steps below skip that arch instead of rejecting an empty
+          # --bin-sum-* arg.
+          for arch in x64 arm64; do
+            tarball="dist/Grok_Bot_${VER}_linux_${arch}.tar.gz"
+            if [[ -f "${tarball}" ]]; then
+              sum="$(sha256sum "${tarball}" | awk '{print $1}')"
+              echo "tarball_sum_${arch}=${sum}" >> "${GITHUB_OUTPUT}"
+              echo "sha256(${tarball}) = ${sum}"
+            else
+              echo "tarball_sum_${arch}=" >> "${GITHUB_OUTPUT}"
+              echo "::notice::no ${tarball} — skipping ${arch} hash (build matrix may not have published this arch)"
+            fi
+          done
 
       - name: Fix chrome-sandbox permissions in tarball (post-hoc note)
         run: |
@@ -407,11 +418,20 @@ jobs:
         id: aur-bump
         env:
           VER: ${{ needs.detect-version.outputs.version }}
-          TARBALL_SUM: ${{ steps.artifacts.outputs.tarball_sum }}
+          TARBALL_SUM_X64: ${{ steps.artifacts.outputs.tarball_sum_x64 }}
+          TARBALL_SUM_ARM64: ${{ steps.artifacts.outputs.tarball_sum_arm64 }}
           REBUILD: ${{ needs.detect-version.outputs.rebuild }}
         run: |
           set -euo pipefail
           [[ -d aur/grokbot-linux-port && -d aur/grokbot-linux-port-bin ]] || { echo "aur/ tree missing"; echo "changed=false" >> "${GITHUB_OUTPUT}"; exit 0; }
+
+          # Build the --bin-sum-* args array conditionally: update-aur.sh
+          # rejects an empty sum, and a build matrix that didn't publish an
+          # arch (e.g. arm64 not yet enabled) would otherwise set the env
+          # to "" and break the bump. Only forward sums that are non-empty.
+          aur_sum_args=()
+          [[ -n "${TARBALL_SUM_X64}" ]] && aur_sum_args+=(--bin-sum-x64 "${TARBALL_SUM_X64}")
+          [[ -n "${TARBALL_SUM_ARM64}" ]] && aur_sum_args+=(--bin-sum-arm64 "${TARBALL_SUM_ARM64}")
 
           if [[ "${REBUILD}" == "true" ]]; then
             # Rebuild resync: the tag and its source archive predate this
@@ -421,13 +441,13 @@ jobs:
             # bump pkgrel; AUR helpers ignore same-pkgrel updates. VERSION
             # is left untouched — nothing version-related changed.
             echo "Rebuild of ${VER} — resyncing -bin checksum + pkgrel"
-            bash scripts/update-aur.sh --bin-only --bin-sum "${TARBALL_SUM}" "${VER}"
+            bash scripts/update-aur.sh --bin-only "${aur_sum_args[@]}" "${VER}"
             echo "changed=true" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
-          echo "Bumping AUR packages to ${VER} (tarball sha256 ${TARBALL_SUM})"
-          bash scripts/update-aur.sh --bin-sum "${TARBALL_SUM}" "${VER}"
+          echo "Bumping AUR packages to ${VER} (x64=${TARBALL_SUM_X64:-<none>} arm64=${TARBALL_SUM_ARM64:-<none>})"
+          bash scripts/update-aur.sh "${aur_sum_args[@]}" "${VER}"
           if git diff --quiet -- aur/; then
             echo "AUR PKGBUILDs already carried ${VER} — nothing to commit"
             echo "changed=false" >> "${GITHUB_OUTPUT}"
@@ -442,19 +462,28 @@ jobs:
         id: spec-bump
         env:
           VER: ${{ needs.detect-version.outputs.version }}
-          TARBALL_SUM: ${{ steps.artifacts.outputs.tarball_sum }}
+          TARBALL_SUM_X64: ${{ steps.artifacts.outputs.tarball_sum_x64 }}
+          TARBALL_SUM_ARM64: ${{ steps.artifacts.outputs.tarball_sum_arm64 }}
           REBUILD: ${{ needs.detect-version.outputs.rebuild }}
         run: |
           set -euo pipefail
           [[ -f grokbot-linux-port.spec ]] || { echo "grokbot-linux-port.spec missing"; echo "changed=false" >> "${GITHUB_OUTPUT}"; exit 0; }
 
+          # Same conditional-passing rule as the AUR step: update-spec.sh
+          # only gets --sum-x64 / --sum-arm64 for arches that actually
+          # published a tarball this run. The legacy --sum form keeps the
+          # existing x64 behaviour so a single-arch release keeps working.
+          spec_args=()
+          [[ -n "${TARBALL_SUM_X64}" ]] && spec_args+=(--sum-x64 "${TARBALL_SUM_X64}")
+          [[ -n "${TARBALL_SUM_ARM64}" ]] && spec_args+=(--sum-arm64 "${TARBALL_SUM_ARM64}")
+
           if [[ "${REBUILD}" == "true" ]]; then
             # Same resync semantics as the AUR -bin package: freshly rebuilt
             # release bytes need the new checksum plus a Release bump so
             # installed clients pick the update up.
-            bash scripts/update-spec.sh --bump-release --sum "${TARBALL_SUM}" "${VER}"
+            bash scripts/update-spec.sh --bump-release "${spec_args[@]}" "${VER}"
           else
-            bash scripts/update-spec.sh --sum "${TARBALL_SUM}" "${VER}"
+            bash scripts/update-spec.sh "${spec_args[@]}" "${VER}"
           fi
           if git diff --quiet -- grokbot-linux-port.spec; then
             echo "spec already carried ${VER} — nothing to commit"
