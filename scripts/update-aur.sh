@@ -4,20 +4,28 @@ set -euo pipefail
 #
 # Usage:
 #   scripts/update-aur.sh 0.20.0
-#   scripts/update-aur.sh --no-download 0.20.0            # trust existing sums / skip hashing / bump pkgrel
-#   scripts/update-aur.sh --bin-sum <sha256> 0.20.0       # -bin sum pre-hashed by the release job
-#   scripts/update-aur.sh --bin-only --bin-sum <s> 0.20.0 # touch only the -bin package (rebuild resync)
+#   scripts/update-aur.sh --no-download 0.20.0                                  # trust existing sums / skip hashing / bump pkgrel
+#   scripts/update-aur.sh --bin-sum-x64 <s> [--bin-sum-arm64 <s>] 0.20.0        # -bin sums pre-hashed by the release job
+#   scripts/update-aur.sh --bin-only --bin-sum-x64 <s> [--bin-sum-arm64 <s>] 0.20.0  # touch only the -bin package (rebuild resync)
+#   scripts/update-aur.sh --bin-only --bin-sum <s> 0.20.0                       # legacy: --bin-sum is treated as x64
 #
-# --bin-sum exists because the release job hashes the artifact bytes it just
-# uploaded: hashing the freshly-published URL again would race GitHub's CDN
-# propagation and can bake a sum for bytes the CDN no longer serves. The
-# source package always hashes the tag tarball itself — the tag already
-# exists at release-publish time, so there is no race.
+# --bin-sum-{x64,arm64} exist because the release job hashes the artifact bytes
+# it just uploaded: hashing the freshly-published URL again would race GitHub's
+# CDN propagation and can bake a sum for bytes the CDN no longer serves. The
+# source package always hashes the tag tarball itself — the tag already exists
+# at release-publish time, so there is no race.
+#
+# The -bin PKGBUILD only bumps pkgver when BOTH arch sums are present, otherwise
+# the missing branch's makepkg would download the new version with the old
+# digest and fail. The build matrix in auto-update.yml may have published only
+# one arch this run; in that case we skip and warn instead of corrupting AUR.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 NO_DOWNLOAD=false
+BIN_SUM_X64=""
+BIN_SUM_ARM64=""
 BIN_SUM=""
 BIN_ONLY=false
 while [[ $# -gt 0 ]]; do
@@ -27,7 +35,18 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --bin-sum)
-      BIN_SUM="${2:?'--bin-sum requires a sha256 argument'}"
+      # Legacy single-arch form: feeds the x64 slot so the existing release
+      # job that only builds x64 keeps working without code churn.
+      BIN_SUM_X64="${2:?'--bin-sum requires a sha256 argument'}"
+      BIN_SUM="${BIN_SUM_X64}"
+      shift 2
+      ;;
+    --bin-sum-x64)
+      BIN_SUM_X64="${2:?'--bin-sum-x64 requires a sha256 argument'}"
+      shift 2
+      ;;
+    --bin-sum-arm64)
+      BIN_SUM_ARM64="${2:?'--bin-sum-arm64 requires a sha256 argument'}"
       shift 2
       ;;
     --bin-only)
@@ -45,7 +64,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ $# -ne 1 ]]; then
-  echo "usage: $(basename "$0") [--no-download] [--bin-only] [--bin-sum <sha256>] <x.y.z>" >&2
+  echo "usage: $(basename "$0") [--no-download] [--bin-only] [--bin-sum-x64 <sha>] [--bin-sum-arm64 <sha>] [--bin-sum <sha>] <x.y.z>" >&2
   exit 1
 fi
 VER="$1"
@@ -53,13 +72,18 @@ if ! [[ "${VER}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "error: version '${VER}' does not match x.y.z" >&2
   exit 1
 fi
-if [[ -n "${BIN_SUM}" && ! "${BIN_SUM}" =~ ^[0-9a-f]{64}$ ]]; then
-  echo "error: --bin-sum '${BIN_SUM}' is not a lowercase sha256 hex digest" >&2
-  exit 1
-fi
+for v in BIN_SUM BIN_SUM_X64 BIN_SUM_ARM64; do
+  if [[ -n "${!v}" && ! "${!v}" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "error: ${v} '${!v}' is not a lowercase sha256 hex digest" >&2
+    exit 1
+  fi
+done
 
 update_one() {
   local dir="$1" expect_src="$2" sum="$3" bump_pkgrel="${4:-false}"
+  # Per-arch sums: set by the caller via env when present; only slots with
+  # non-empty values are written. An empty slot is a deliberate "leave the
+  # existing digest alone" signal.
   local pkgbuild="${dir}/PKGBUILD"
   [[ -f "${pkgbuild}" ]] || { echo "skip: no ${pkgbuild}" >&2; return 0; }
 
@@ -75,17 +99,31 @@ update_one() {
   fi
 
   if [[ "${NO_DOWNLOAD}" == "false" ]]; then
-    if [[ -n "${sum}" ]]; then
-      # Replace first sha256sums occurrence (supports both array forms)
-      # Keep quoting intact: sha256sums=('...') or sha256sums=("...")
-      python3 - <<PY
-import re, pathlib
-p = pathlib.Path("${pkgbuild}")
-t = p.read_text()
-# Replace first sha256sums=(...) with new sum
-t2 = re.sub(r"sha256sums=\([^)]*\)", "sha256sums=('${sum}')", t, count=1)
-p.write_text(t2)
-print("updated sha256sums in ${pkgbuild}")
+    # The -bin PKGBUILD uses per-arch sha256sums_x86_64 / sha256sums_aarch64;
+    # the source package keeps the legacy plain sha256sums=(...). ${sum_x64}
+    # / ${sum_arm64} are passed as env vars from the caller when applicable;
+    # ${sum} is the legacy single-arch value used by the source package.
+    if [[ -n "${sum}" || -n "${AUR_SUM_X64:-}" || -n "${AUR_SUM_ARM64:-}" ]]; then
+      PKGBUILD="${pkgbuild}" SUM="${sum:-}" AUR_SUM_X64="${AUR_SUM_X64:-}" AUR_SUM_ARM64="${AUR_SUM_ARM64:-}" python3 - <<'PY'
+import os, re, pathlib
+pkgbuild = pathlib.Path(os.environ["PKGBUILD"])
+sum_legacy = os.environ.get("SUM", "")
+sum_x64 = os.environ.get("AUR_SUM_X64", "")
+sum_arm64 = os.environ.get("AUR_SUM_ARM64", "")
+t = pkgbuild.read_text()
+# Per-arch sums: only the slot whose value is non-empty gets touched.
+def replace_per_arch(t, var, val):
+    if not val:
+        return t
+    pat = re.compile(rf'(?m)^{var}=\(([^)]*)\)')
+    return pat.sub(f"{var}=('{val}')", t, count=1)
+t = replace_per_arch(t, "sha256sums_x86_64", sum_x64)
+t = replace_per_arch(t, "sha256sums_aarch64", sum_arm64)
+# Legacy single-arch sha256sums=(...) used by the source package.
+if sum_legacy:
+    t = re.sub(r"sha256sums=\(([^)]*)\)", f"sha256sums=('{sum_legacy}')", t, count=1)
+pkgbuild.write_text(t)
+print(f"updated sha256sums in {pkgbuild}")
 PY
     fi
   fi
@@ -121,35 +159,36 @@ if srcinfo.exists():
     m_rel = re.search(r"^pkgrel=([^\n]+)", t, re.MULTILINE)
     if m_rel:
         s = re.sub(r"(?m)^\s*pkgrel =.*", f"	pkgrel = {m_rel.group(1).strip()}", s, count=1)
-    m_src = re.search(r"^source=.*", t, re.MULTILINE)
-    if m_src:
-        raw_src = m_src.group(0)
-        # Expand PKGBUILD variables that makepkg would
-        m_pkg = re.search(r"^pkgname=([^\n]+)", t, re.MULTILINE)
-        pkgname = m_pkg.group(1).strip().strip("\"'") if m_pkg else ""
-        expanded = raw_src.replace("${pkgname}", pkgname).replace("$pkgname", pkgname).replace("${pkgver}", VER_FALLBACK).replace("$pkgver", VER_FALLBACK)
-        try:
-            src_val = expanded.split("=",1)[1].strip()
-            src_val = src_val.strip()
-            if src_val.startswith("(") and src_val.endswith(")"):
-                src_val = src_val[1:-1].strip()
-            if (src_val.startswith('"') and src_val.endswith('"')) or (src_val.startswith("'") and src_val.endswith("'")):
-                src_val = src_val[1:-1]
-            src_val = src_val.strip().strip('"').strip("'").strip()
-            if src_val.startswith("("):
-                src_val = src_val[1:]
-            if src_val.endswith(")"):
-                src_val = src_val[:-1]
-            src_val = src_val.strip().strip('"').strip("'").strip()
-            s = re.sub(r"(?m)^\s*source =.*", f"	source = {src_val}", s, count=1)
-        except Exception:
-            pass
+    # Sync source_x86_64 / source_aarch64 (and any other source_*) lines,
+    # not just source=. The -bin PKGBUILD uses per-arch source arrays.
+    def replace_source(t_pat, val):
+        if not val:
+            return
+        # expand ${pkgver} / $pkgver
+        v = val.replace("${pkgver}", VER_FALLBACK).replace("$pkgver", VER_FALLBACK)
+        s = re.sub(rf"(?m)^\s*{re.escape(t_pat)} =.*", f"\t{t_pat} = {v}", s, count=1)
+    for m_src in re.finditer(r"^source(_[A-Za-z0-9_]+)?=([^\n]+)", t, re.MULTILINE):
+        var = m_src.group(0).split("=", 1)[0]
+        # Pull the URL out: source_x86_64=(...::URL) — same shape for plain source=
+        raw = m_src.group(2)
+        # raw looks like ('name::url') — extract url
+        url_m = re.search(r"::([^'\")]+)", raw)
+        if url_m:
+            replace_source(var, url_m.group(1).strip())
     m = re.search(r"sha256sums=\(([^)]*)\)", t)
     if m:
         sums = re.findall(r"'([^']*)'|\"([^\"]*)\"", m.group(1))
         flat = [a or b for a,b in sums]
         if flat:
             s = re.sub(r"(?m)^\s*sha256sums =.*", f"	sha256sums = {flat[0]}", s, count=1)
+    # Per-arch sha256sums_x86_64 / sha256sums_aarch64
+    for arch_var in ("sha256sums_x86_64", "sha256sums_aarch64"):
+        m = re.search(rf"^{arch_var}=\(([^)]*)\)", t, re.MULTILINE)
+        if m:
+            sums = re.findall(r"'([^']*)'|\"([^\"]*)\"", m.group(1))
+            flat = [a or b for a,b in sums]
+            if flat:
+                s = re.sub(rf"(?m)^\s*{re.escape(arch_var)} =.*", f"\t{arch_var} = {flat[0]}", s, count=1)
     srcinfo.write_text(s)
     print(f"fallback patched {srcinfo} (no makepkg)")
 else:
@@ -183,41 +222,52 @@ if [[ "${BIN_ONLY}" != "true" ]]; then
   update_one "${SRC_PKG_DIR}" "${SRC_TARBALL_URL}" "${SRC_SUM}"
 fi
 
-BIN_TARBALL_URL="https://github.com/Nichokas/grokbot-linux-port/releases/download/v${VER}/Grok_Bot_${VER}_linux_x64.tar.gz"
-if [[ -z "${BIN_SUM}" ]]; then
-  echo "Hashing release tarball: ${BIN_TARBALL_URL}" >&2
-  # HEAD probes can 403 on some CDNs while GET succeeds — try HEAD first, then attempt GET hash directly.
-  if curl --head --fail --silent --location --max-time 15 "${BIN_TARBALL_URL}" >/dev/null 2>&1; then
-    BIN_SUM="$(curl --fail --silent --show-error --location --retry 2 --max-time 300 "${BIN_TARBALL_URL}" | sha256sum | awk '{print $1}')"
-    echo "  -> ${BIN_SUM}" >&2
+# -bin: fetch each arch's tarball sum independently. Caller-supplied sums
+# (--bin-sum-x64 / --bin-sum-arm64) take precedence so the release job can
+# hand off fresh bytes without a re-download race. Hashing defaults to x64
+# only when the caller did not pass anything; arm64 stays empty unless
+# explicitly supplied, which is the current CI default (build matrix has
+# x64 enabled, arm64 still rolling out).
+if [[ -z "${BIN_SUM_X64}" ]]; then
+  BIN_TARBALL_URL_X64="https://github.com/Nichokas/grokbot-linux-port/releases/download/v${VER}/Grok_Bot_${VER}_linux_x64.tar.gz"
+  echo "Hashing release tarball: ${BIN_TARBALL_URL_X64}" >&2
+  if curl --head --fail --silent --location --max-time 15 "${BIN_TARBALL_URL_X64}" >/dev/null 2>&1; then
+    BIN_SUM_X64="$(curl --fail --silent --show-error --location --retry 2 --max-time 300 "${BIN_TARBALL_URL_X64}" | sha256sum | awk '{print $1}')"
+    echo "  -> x64: ${BIN_SUM_X64}" >&2
   else
-    echo "HEAD probe failed — attempting GET hash as fallback..." >&2
-    _fallback_tmp="$(mktemp)"
-    if curl --fail --silent --show-error --location --retry 2 --max-time 300 -o "${_fallback_tmp}" "${BIN_TARBALL_URL}" 2>/dev/null && [[ -s "${_fallback_tmp}" ]]; then
-      _fallback_sum="$(sha256sum "${_fallback_tmp}" | awk '{print $1}')"
-    else
-      _fallback_sum=""
-    fi
-    rm -f "${_fallback_tmp}"
-    if [[ -n "${_fallback_sum}" && "${#_fallback_sum}" -eq 64 ]]; then
-      BIN_SUM="${_fallback_sum}"
-      echo "  -> ${BIN_SUM} (via GET fallback)" >&2
-    else
-      BIN_SUM=""
-      echo "warn: release tarball not yet available (release may not be published) — leaving -bin untouched" >&2
-    fi
-    unset _fallback_sum
+    echo "warn: x64 release tarball not yet available (release may not be published)" >&2
   fi
-else
-  echo "Using caller-supplied -bin sha256: ${BIN_SUM}" >&2
+fi
+if [[ -z "${BIN_SUM_ARM64}" ]]; then
+  BIN_TARBALL_URL_ARM64="https://github.com/Nichokas/grokbot-linux-port/releases/download/v${VER}/Grok_Bot_${VER}_linux_arm64.tar.gz"
+  echo "Hashing release tarball: ${BIN_TARBALL_URL_ARM64}" >&2
+  if curl --head --fail --silent --location --max-time 15 "${BIN_TARBALL_URL_ARM64}" >/dev/null 2>&1; then
+    BIN_SUM_ARM64="$(curl --fail --silent --show-error --location --retry 2 --max-time 300 "${BIN_TARBALL_URL_ARM64}" | sha256sum | awk '{print $1}')"
+    echo "  -> arm64: ${BIN_SUM_ARM64}" >&2
+  else
+    echo "warn: arm64 release tarball not yet available (release may not be published)" >&2
+  fi
 fi
 
-if [[ -n "${BIN_SUM}" ]]; then
-  # pkgrel bumps only on rebuild resyncs (--bin-only): a fresh pkgver resets
-  # to pkgrel=1 by convention handled at PKGBUILD authoring time.
-  update_one "${BIN_PKG_DIR}" "${BIN_TARBALL_URL}" "${BIN_SUM}" "${BIN_ONLY}"
+# Guard (fix #2): the -bin PKGBUILD only bumps pkgver when BOTH arch sums
+# are present. If only one branch has a digest, bumping the shared pkgver
+# would leave the other branch with a stale checksum — that branch's
+# makepkg would then download the new version with the old digest and
+# fail. Skip + warn instead of corrupting AUR. The next CI run that
+# publishes both arches will pick up cleanly.
+if [[ -n "${BIN_SUM_X64}" && -n "${BIN_SUM_ARM64}" ]]; then
+  AUR_SUM_X64="${BIN_SUM_X64}" AUR_SUM_ARM64="${BIN_SUM_ARM64}" update_one "${BIN_PKG_DIR}" "" "" "${BIN_ONLY}"
+elif [[ -n "${BIN_SUM_X64}" || -n "${BIN_SUM_ARM64}" ]]; then
+  if [[ "${BIN_ONLY}" == "true" ]]; then
+    echo "warn: --bin-only with only one arch sum present; skipping -bin bump to avoid stale checksum (re-run after both arches publish)" >&2
+  else
+    # Fresh-version path: the source PKGBUILD's pkgver was just bumped
+    # above, but the -bin PKGBUILD would diverge. Echo the divergence and
+    # let the next rebuild resync (--bin-only) pick up the missing arch.
+    echo "warn: only one arch sum present; skipping -bin bump to avoid stale checksum (x64=${BIN_SUM_X64:-<empty>} arm64=${BIN_SUM_ARM64:-<empty>})" >&2
+  fi
 else
-  echo "note: release tarball not available — skipping grokbot-linux-port-bin bump (re-run: scripts/update-aur.sh ${VER})" >&2
+  echo "note: no release tarball available — skipping grokbot-linux-port-bin bump (re-run: scripts/update-aur.sh ${VER})" >&2
 fi
 
 echo "done — review with: git diff aur/"

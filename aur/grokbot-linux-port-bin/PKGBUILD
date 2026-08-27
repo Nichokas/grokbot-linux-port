@@ -4,7 +4,7 @@ pkgname=grokbot-linux-port-bin
 pkgver=0.29.0
 pkgrel=3
 pkgdesc="Grok Bot desktop — wine-less Linux port (prebuilt tarball from GitHub Releases)"
-arch=('x86_64')
+arch=('x86_64' 'aarch64')
 url="https://github.com/Nichokas/grokbot-linux-port"
 license=('custom')
 depends=(
@@ -17,14 +17,24 @@ makedepends=('python')
 optdepends=('libnotify: desktop notifications')
 provides=('grokbot-linux-port' 'grok-bot' 'grokbot')
 conflicts=('grokbot-linux-port' 'grok-bot')
-source=("Grok_Bot_${pkgver}_linux_x64.tar.gz::https://github.com/Nichokas/grokbot-linux-port/releases/download/v${pkgver}/Grok_Bot_${pkgver}_linux_x64.tar.gz")
-sha256sums=('0ed63f0beae1d5a61ec7b1ebb0d1d1931522c1c28ced0532c451cf4f294b3912')
+source_x86_64=("Grok_Bot_${pkgver}_linux_x64.tar.gz::https://github.com/Nichokas/grokbot-linux-port/releases/download/v${pkgver}/Grok_Bot_${pkgver}_linux_x64.tar.gz")
+source_aarch64=("Grok_Bot_${pkgver}_linux_arm64.tar.gz::https://github.com/Nichokas/grokbot-linux-port/releases/download/v${pkgver}/Grok_Bot_${pkgver}_linux_arm64.tar.gz")
+sha256sums_x86_64=('0ed63f0beae1d5a61ec7b1ebb0d1d1931522c1c28ced0532c451cf4f294b3912')
+sha256sums_aarch64=('0000000000000000000000000000000000000000000000000000000000000000')
 
 package() {
-  local staged
-  staged="${srcdir}/Grok_Bot_${pkgver}_linux_x64"
-  if [[ ! -d "${staged}" ]]; then
-    echo "error: staged dir Grok_Bot_${pkgver}_linux_x64 not found under srcdir" >&2
+  # Per-arch source arrays land the matching tarball under ${srcdir}; pick
+  # whichever extracted directory exists. x86_64 stays first because the
+  # upstream AUR index already lists it as the canonical arch.
+  local staged=""
+  for arch_dir in linux_x64 linux_arm64; do
+    if [[ -d "${srcdir}/Grok_Bot_${pkgver}_${arch_dir}" ]]; then
+      staged="${srcdir}/Grok_Bot_${pkgver}_${arch_dir}"
+      break
+    fi
+  done
+  if [[ -z "${staged}" ]]; then
+    echo "error: no staged Grok_Bot_${pkgver}_linux_* dir found under srcdir" >&2
     ls -R "${srcdir}" | head -n 100 >&2
     exit 1
   fi
