@@ -159,12 +159,13 @@ if sum_x64:
         t,
         count=1,
     )
-# Update the arm64 sha line. The placeholder is "ARM64_SUM_PLACEHOLDER" until
-# the first arm64 build publishes; replace it OR an existing real digest.
+# Update the arm64 sha line. Before the first arm64 release the spec carries
+# a pending-marker line (no digest exists to pin yet); replace that OR an
+# existing real digest.
 if sum_arm64:
     t = re.sub(
-        r'(?m)^echo "(?:ARM64_SUM_PLACEHOLDER|[0-9a-f]{64})  %\{_sourcedir\}/Grok_Bot_[^/"]*_linux_arm64\.tar\.gz"',
-        f'echo "{sum_arm64}  %{{_sourcedir}}/Grok_Bot_{ver}_linux_arm64.tar.gz"',
+        r'(?m)^echo "(?:(?:ARM64_SUM_PLACEHOLDER|arm64 sha check pending[^\n]*|[0-9a-f]{64})  %\{_sourcedir\}/Grok_Bot_[^/"]*_linux_arm64\.tar\.gz"\s*\|\s*sha256sum -c -|arm64 sha check pending[^\n]*)"',
+        f'echo "{sum_arm64}  %{{_sourcedir}}/Grok_Bot_{ver}_linux_arm64.tar.gz" | sha256sum -c -',
         t,
         count=1,
     )

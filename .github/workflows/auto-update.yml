@@ -597,26 +597,35 @@ jobs:
           sudo apt-get install -y --no-install-recommends debhelper devscripts lintian
           tmp="$(mktemp -d -t deb-lint-XXXXXX)"
           trap 'rm -rf "${tmp}"' EXIT
-          mkdir -p "${tmp}/Grok_Bot_0.0.1_linux_x64/resources" "${tmp}/Grok_Bot_0.0.1_linux_x64/locales"
-          printf '#!/bin/sh\necho grok-bot stub\n' > "${tmp}/Grok_Bot_0.0.1_linux_x64/grok-bot"
-          chmod +x "${tmp}/Grok_Bot_0.0.1_linux_x64/grok-bot"
-          touch "${tmp}/Grok_Bot_0.0.1_linux_x64/chrome-sandbox"
-          echo "stub" > "${tmp}/Grok_Bot_0.0.1_linux_x64/resources/app.asar"
-          stub="/tmp/Grok_Bot_0.0.1_linux_x64.tar.gz"
-          tar -czf "${stub}" -C "${tmp}" Grok_Bot_0.0.1_linux_x64
-          sum="$(sha256sum "${stub}" | awk '{print $1}')"
-          echo "stub sha256=${sum}"
-          bash scripts/build-deb.sh --tarball "${stub}" --sha256 "${sum}" --series noble --out-dir /tmp/deb-lint-out
-          echo "--- .changes ---"
-          cat /tmp/deb-lint-out/noble/*_source.changes
-          echo "--- .dsc ---"
-          cat /tmp/deb-lint-out/noble/*.dsc
-          # .changes must list the source tarball (revision-agnostic: ~ppa<N>
-          # mirrors the spec's Release counter, so don't pin it here)
-          grep -q "grokbot-linux-port_0.0.1~ppa[0-9]*~noble1" /tmp/deb-lint-out/noble/*_source.changes
-          grep -q "grokbot-linux-port_0.0.1~ppa[0-9]*~noble1" /tmp/deb-lint-out/noble/*.dsc
-          # --fail-on error: warnings don't fail the gate, errors do
-          lintian --fail-on error /tmp/deb-lint-out/noble/*_source.changes
+          # Stub tarball mirrors the real filename per arch; build-deb.sh's
+          # --arch gate refuses a mismatch, so both arches prove the mapping.
+          for arch in amd64 arm64; do
+            case "${arch}" in
+              amd64) kernel="linux_x64" ;;
+              arm64) kernel="linux_arm64" ;;
+            esac
+            mkdir -p "${tmp}/Grok_Bot_0.0.1_${kernel}/resources" "${tmp}/Grok_Bot_0.0.1_${kernel}/locales"
+            printf '#!/bin/sh\necho grok-bot stub\n' > "${tmp}/Grok_Bot_0.0.1_${kernel}/grok-bot"
+            chmod +x "${tmp}/Grok_Bot_0.0.1_${kernel}/grok-bot"
+            touch "${tmp}/Grok_Bot_0.0.1_${kernel}/chrome-sandbox"
+            echo "stub" > "${tmp}/Grok_Bot_0.0.1_${kernel}/resources/app.asar"
+            stub="/tmp/Grok_Bot_0.0.1_${kernel}.tar.gz"
+            tar -czf "${stub}" -C "${tmp}" "Grok_Bot_0.0.1_${kernel}"
+            sum="$(sha256sum "${stub}" | awk '{print $1}')"
+            echo "stub sha256 (${arch})=${sum}"
+            bash scripts/build-deb.sh --tarball "${stub}" --sha256 "${sum}" --arch "${arch}" --series noble --out-dir /tmp/deb-lint-out
+            echo "--- ${arch} .changes ---"
+            cat "/tmp/deb-lint-out/${arch}/noble/"*_source.changes
+            echo "--- ${arch} .dsc ---"
+            cat "/tmp/deb-lint-out/${arch}/noble/"*.dsc
+            # .changes must list the source tarball (revision-agnostic: ~ppa<N>
+            # mirrors the spec's Release counter, so don't pin it here). The
+            # +arch suffix keeps the two matrix uploads distinct in Launchpad.
+            grep -q "grokbot-linux-port_0.0.1~ppa[0-9]*~noble1+${arch}" "/tmp/deb-lint-out/${arch}/noble/"*_source.changes
+            grep -q "grokbot-linux-port_0.0.1~ppa[0-9]*~noble1+${arch}" "/tmp/deb-lint-out/${arch}/noble/"*.dsc
+            # --fail-on error: warnings don't fail the gate, errors do
+            lintian --fail-on error "/tmp/deb-lint-out/${arch}/noble/"*_source.changes
+          done
 
   # -----------------------------------------------------------------------
   # aur-publish — push PKGBUILD + .SRCINFO to aur.archlinux.org

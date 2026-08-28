@@ -85,39 +85,45 @@ jobs:
           echo "Imported GPG key ${keyid}"
 
       - name: Build Debian source packages
+        if: env.PPA_SKIP != '1'
         env:
           KEYID: ${{ steps.gpg.outputs.keyid }}
         run: |
           set -euo pipefail
           ver="$(cat VERSION | tr -d '[:space:]')"
-          tarball="dist/Grok_Bot_${ver}_linux_x64.tar.gz"
+          case "${{ matrix.arch }}" in
+            amd64) kernel="linux_x64" ;;
+            arm64) kernel="linux_arm64" ;;
+          esac
+          tarball="dist/Grok_Bot_${ver}_${kernel}.tar.gz"
           sha="$(sha256sum "${tarball}" | awk '{print $1}')"
           echo "tarball=${tarball} sha256=${sha:0:12}…"
-          bash scripts/build-deb.sh --tarball "${tarball}" --sha256 "${sha}" --sign-key "${KEYID}" --out-dir ppa-out
+          bash scripts/build-deb.sh --tarball "${tarball}" --sha256 "${sha}" --arch "${{ matrix.arch }}" --sign-key "${KEYID}" --out-dir ppa-out
           echo "Built source packages:"
           find ppa-out -type f | sort | xargs -r ls -lh
 
       - name: Upload to PPA (dput)
+        if: env.PPA_SKIP != '1'
         run: |
           set -euo pipefail
           # Retry once — Launchpad occasionally 503s on upload; CDN propagation
           # of the release tarball is not a factor here (tarball is baked into
           # the source package, not fetched by the builder).
           for ser in noble resolute; do
-            echo "::group::dput ${ser}"
-            changes="$(ls ppa-out/${ser}/*_source.changes 2>/dev/null | head -n 1 || true)"
+            echo "::group::dput ${{ matrix.arch }} ${ser}"
+            changes="$(ls ppa-out/${{ matrix.arch }}/${ser}/*_source.changes 2>/dev/null | head -n 1 || true)"
             if [[ -z "${changes}" ]]; then
-              echo "::error::no _source.changes for ${ser}" >&2
+              echo "::error::no _source.changes for ${{ matrix.arch }}/${ser}" >&2
               exit 1
             fi
             attempt=0
             until dput "ppa:nichito/grokbot-linux-port" "${changes}"; do
               attempt=$((attempt + 1))
               if [[ ${attempt} -ge 2 ]]; then
-                echo "::error::dput failed for ${ser} after ${attempt} attempts" >&2
+                echo "::error::dput failed for ${{ matrix.arch }}/${ser} after ${attempt} attempts" >&2
                 exit 1
               fi
-              echo "dput failed for ${ser} — retrying in 10s (attempt ${attempt}/2)..." >&2
+              echo "dput failed for ${{ matrix.arch }}/${ser} — retrying in 10s (attempt ${attempt}/2)..." >&2
               sleep 10
             done
             echo "::endgroup::"

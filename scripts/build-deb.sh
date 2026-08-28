@@ -19,16 +19,18 @@ SHA256=""
 SIGN_KEY=""
 OUT_DIR="ppa-out"
 SERIES=()
+ARCH="amd64"
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") --tarball <path> --sha256 <hex> [--series noble|resolute]... [--sign-key <KEYID>] [--out-dir <dir>]
+Usage: $(basename "$0") --tarball <path> --sha256 <hex> [--arch amd64|arm64] [--series noble|resolute]... [--sign-key <KEYID>] [--out-dir <dir>]
 
-  --tarball  Path to Grok_Bot_<ver>_linux_x64.tar.gz (required)
+  --tarball  Path to Grok_Bot_<ver>_linux_x64.tar.gz (or _linux_arm64 for --arch arm64) (required)
   --sha256   Expected sha256 of the tarball (required; verified before build)
+  --arch     Target Debian arch (amd64 or arm64; default: amd64)
   --series   Ubuntu series to build for (repeatable; default: noble resolute)
   --sign-key GPG key id to sign .dsc/.changes with (dpkg-buildpackage -k<KEYID>)
-  --out-dir  Output directory for .changes/.dsc (default: ppa-out)
+  --out-dir  Output directory for .changes/.dsc (default: ppa-out; layout: <out>/<arch>/<series>/)
 EOF
 }
 
@@ -36,6 +38,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --tarball) TARBALL="${2:?--tarball requires a path}"; shift 2 ;;
     --sha256) SHA256="${2:?--sha256 requires a value}"; shift 2 ;;
+    --arch) ARCH="${2:?--arch requires a value}"; shift 2 ;;
     --series) SERIES+=("${2:?--series requires a value}"); shift 2 ;;
     --sign-key) SIGN_KEY="${2:?--sign-key requires a key id}"; shift 2 ;;
     --out-dir) OUT_DIR="${2:?--out-dir requires a path}"; shift 2 ;;
@@ -55,6 +58,14 @@ fi
 if [[ ! -f "${TARBALL}" ]]; then
   echo "error: tarball not found: ${TARBALL}" >&2; exit 1
 fi
+# Map Debian arch to the tarball kernel-name suffix (amd64 -> linux_x64,
+# arm64 -> linux_arm64) — port.sh produces the tarball; the Debian arch only
+# feeds debian/control's Architecture: field.
+case "${ARCH}" in
+  amd64)  KERNEL_ARCH="linux_x64" ;;
+  arm64)  KERNEL_ARCH="linux_arm64" ;;
+  *) echo "error: --arch '${ARCH}' must be one of: amd64, arm64" >&2; exit 1 ;;
+esac
 if [[ ${#SERIES[@]} -eq 0 ]]; then
   SERIES=(noble resolute)
 fi
@@ -63,8 +74,8 @@ for s in "${SERIES[@]}"; do
 done
 
 TARBALL_BASENAME="$(basename "${TARBALL}")"
-if ! [[ "${TARBALL_BASENAME}" =~ Grok_Bot_([0-9]+\.[0-9]+\.[0-9]+)_linux_x64\.tar\.gz ]]; then
-  echo "error: tarball name '${TARBALL_BASENAME}' does not match Grok_Bot_<ver>_linux_x64.tar.gz" >&2; exit 1
+if ! [[ "${TARBALL_BASENAME}" =~ Grok_Bot_([0-9]+\.[0-9]+\.[0-9]+)_${KERNEL_ARCH}\.tar\.gz ]]; then
+  echo "error: tarball name '${TARBALL_BASENAME}' does not match Grok_Bot_<ver>_${KERNEL_ARCH}.tar.gz (--arch ${ARCH})" >&2; exit 1
 fi
 VER="${BASH_REMATCH[1]}"
 
@@ -88,20 +99,21 @@ echo "  sha256 OK (${SHA256:0:12}…)" >&2
 if [[ "${OUT_DIR}" != /* ]]; then
   OUT_DIR="${REPO_ROOT}/${OUT_DIR}"
 fi
-# Re-run friendly AND safe: clear the out-dir only when every top-level entry
-# is something this script generated; foreign content (--out-dir $HOME) must
-# fail loudly, never be wiped.
+# Output lands under <out>/<arch>/<series>/ so amd64 and arm64 runs share an
+# out-dir without clobbering each other. Only THIS arch's subtree is wiped —
+# a re-run must not delete the sibling arch's .dsc/.changes. Foreign content
+# at the top level still fails loudly (--out-dir $HOME must never be wiped).
 if [[ -e "${OUT_DIR}" || -L "${OUT_DIR}" ]]; then
   [[ -d "${OUT_DIR}" ]] || { echo "error: --out-dir '${OUT_DIR}' exists and is not a directory" >&2; exit 1; }
   while IFS= read -r -d '' entry; do
     case "$(basename "${entry}")" in
-      noble|resolute|grokbot-linux-port_*) ;;
+      amd64|arm64|grokbot-linux-port_*) ;;
       *) echo "error: --out-dir '${OUT_DIR}' contains foreign entry '$(basename "${entry}")' — remove it first" >&2; exit 1 ;;
     esac
   done < <(find "${OUT_DIR}" -mindepth 1 -maxdepth 1 -print0)
-  rm -rf "${OUT_DIR}"
+  rm -rf "${OUT_DIR:?}/${ARCH}"
 fi
-mkdir -p "${OUT_DIR}"
+mkdir -p "${OUT_DIR}/${ARCH}"
 
 CHANGES_FILES=()
 # Every extracted tree (~143 MB each) dies with the process via this trap —
@@ -121,7 +133,7 @@ for SER in "${SERIES[@]}"; do
   # Exact-name match so a mislabeled tarball can't package another version's
   # payload under this filename's DEB_VERSION.
   tar -xzf "${TARBALL}" -C "${WORK}"
-  SRC_TOP="$(find "${WORK}" -maxdepth 1 -type d -name "Grok_Bot_${VER}_linux_x64" -print -quit)"
+  SRC_TOP="$(find "${WORK}" -maxdepth 1 -type d -name "Grok_Bot_${VER}_${KERNEL_ARCH}" -print -quit)"
   if [[ -z "${SRC_TOP}" ]]; then
     echo "error: could not locate extracted top-level dir in ${WORK}" >&2
     ls -R "${WORK}" | head -n 80 >&2
@@ -146,7 +158,9 @@ for SER in "${SERIES[@]}"; do
 3.0 (native)
 FMT
 
-  DEB_VERSION="${VER}~ppa${PPA_REV}~${SER}1"
+  # The +<arch> suffix keeps amd64 and arm64 uploads distinct source
+  # versions in Launchpad (same Source name + version is rejected as a dup).
+  DEB_VERSION="${VER}~ppa${PPA_REV}~${SER}1+${ARCH}"
   DEB_DATE="$(LC_ALL=C date -R -u)"
 
   cat > "${PKG_DIR}/debian/changelog" <<CHLOG
@@ -157,7 +171,8 @@ grokbot-linux-port (${DEB_VERSION}) ${SER}; urgency=medium
  -- Nichokas <nichokas@users.noreply.github.com>  ${DEB_DATE}
 CHLOG
 
-  cat > "${PKG_DIR}/debian/control" <<'CTRL'
+  # Unquoted heredoc so ${ARCH} expands; \$ escapes the debhelper substitution.
+  cat > "${PKG_DIR}/debian/control" <<CTRL
 Source: grokbot-linux-port
 Section: utils
 Priority: optional
@@ -168,8 +183,8 @@ Rules-Requires-Root: binary-targets
 Homepage: https://github.com/Nichokas/grokbot-linux-port
 
 Package: grokbot-linux-port
-Architecture: amd64
-Depends: ${misc:Depends}, libgtk-3-0t64 | libgtk-3-0, libnss3, libxss1, libxtst6, libxrandr2, libxdamage1, libxcomposite1, libxfixes3, libdrm2, libgbm1, libxkbcommon0, libasound2t64 | libasound2, libatspi2.0-0t64 | libatspi2.0-0, libcups2t64 | libcups2, libcairo2, libpango-1.0-0, libexpat1, hicolor-icon-theme
+Architecture: ${ARCH}
+Depends: \${misc:Depends}, libgtk-3-0t64 | libgtk-3-0, libnss3, libxss1, libxtst6, libxrandr2, libxdamage1, libxcomposite1, libxfixes3, libdrm2, libgbm1, libxkbcommon0, libasound2t64 | libasound2, libatspi2.0-0t64 | libatspi2.0-0, libcups2t64 | libcups2, libcairo2, libpango-1.0-0, libexpat1, hicolor-icon-theme
 Recommends: libnotify-bin
 Provides: grok-bot, grokbot
 Conflicts: grok-bot, grokbot
@@ -300,13 +315,11 @@ PYHELPER
   fi
   popd >/dev/null
 
-  OUT_SERIES="${OUT_DIR}/${SER}"
-  # Wipe stale files from a previous run of the same series so CHANGES_FILES
-  # only collects what this invocation produces. The OUT_DIR wipe above
-  # handles the cross-run case, but in-script re-runs of a single series
-  # (e.g. when adding arm64 support) would otherwise leave obsolete
-  # .dsc/.changes/.tar.* in place; dput would then get pointed at the
-  # wrong artefacts and Launchpad would reject the duplicate.
+  OUT_SERIES="${OUT_DIR}/${ARCH}/${SER}"
+  # Wipe stale files from a previous run of the same (arch, series) so
+  # CHANGES_FILES only collects what this invocation produces; dput would
+  # otherwise get pointed at obsolete .dsc/.changes and Launchpad would
+  # reject the duplicate.
   rm -rf "${OUT_SERIES}"
   mkdir -p "${OUT_SERIES}"
   shopt -s nullglob
