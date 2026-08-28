@@ -66,22 +66,26 @@ This package installs the prebuilt tarball published on GitHub Releases by
 the grokbot-linux-port CI.
 
 %prep
-# Source0 is x64, Source1 is arm64. Each chroot extracts only its matching
-# tarball via -b N (the other source is left intact in %{_sourcedir}).
-%if "%{_target_arch}" == "aarch64"
-    %setup -q -n Grok_Bot_%{version}_linux_arm64 -b 1
-%else
-    %setup -q -n Grok_Bot_%{version}_linux_x64 -b 0
+# Refuse arches that carry no tarball: packaging the x64 payload under an
+# e.g. ppc64le RPM would dlopen-fail at runtime.
+%ifnarch x86_64 aarch64
+echo "error: grokbot-linux-port has no payload for %{_target_cpu}" >&2
+exit 1
 %endif
-
-# Belt and braces: the sha256 is also what Source{0,1}'s URL pins, but a
-# release re-upload (CI rebuilds non-deterministic bytes) must fail the RPM
-# build loudly instead of shipping changed content under the same
-# Version-Release. Pick the sum that matches the chroot's arch.
-%if "%{_target_arch}" == "aarch64"
-    echo "ARM64_SUM_PLACEHOLDER  %{_sourcedir}/Grok_Bot_%{version}_linux_arm64.tar.gz" | sha256sum -c -
+# Source0 is x64, Source1 is arm64; each build extracts only its matching
+# tarball. %ifarch tests the chroot's real build arch; the setup macro's
+# per-source unpack flags proved unreliable across rpm versions (rpm 6
+# unpacks Source0 alongside -b 1), so the extraction is spelled out.
+%ifarch aarch64
+rm -rf Grok_Bot_%{version}_linux_arm64
+tar -xf %{SOURCE1}
+echo "ARM64_SUM_PLACEHOLDER  %{_sourcedir}/Grok_Bot_%{version}_linux_arm64.tar.gz" | sha256sum -c -
+cd Grok_Bot_%{version}_linux_arm64
 %else
-    echo "0ed63f0beae1d5a61ec7b1ebb0d1d1931522c1c28ced0532c451cf4f294b3912  %{_sourcedir}/Grok_Bot_%{version}_linux_x64.tar.gz" | sha256sum -c -
+rm -rf Grok_Bot_%{version}_linux_x64
+tar -xf %{SOURCE0}
+echo "0ed63f0beae1d5a61ec7b1ebb0d1d1931522c1c28ced0532c451cf4f294b3912  %{_sourcedir}/Grok_Bot_%{version}_linux_x64.tar.gz" | sha256sum -c -
+cd Grok_Bot_%{version}_linux_x64
 %endif
 
 # The tarball keeps NSIS-derived restrictive modes (drwx------ on

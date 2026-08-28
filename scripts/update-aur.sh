@@ -175,6 +175,7 @@ if srcinfo.exists():
     # Sync source_x86_64 / source_aarch64 (and any other source_*) lines,
     # not just source=. The -bin PKGBUILD uses per-arch source arrays.
     def replace_source(t_pat, val):
+        nonlocal s
         if not val:
             return
         # expand ${pkgver} / $pkgver

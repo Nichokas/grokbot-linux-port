@@ -24,17 +24,17 @@ sha256sums_aarch64=('00000000000000000000000000000000000000000000000000000000000
 
 package() {
   # Per-arch source arrays land the matching tarball under ${srcdir}; pick
-  # whichever extracted directory exists. x86_64 stays first because the
-  # upstream AUR index already lists it as the canonical arch.
-  local staged=""
-  for arch_dir in linux_x64 linux_arm64; do
-    if [[ -d "${srcdir}/Grok_Bot_${pkgver}_${arch_dir}" ]]; then
-      staged="${srcdir}/Grok_Bot_${pkgver}_${arch_dir}"
-      break
-    fi
-  done
-  if [[ -z "${staged}" ]]; then
-    echo "error: no staged Grok_Bot_${pkgver}_linux_* dir found under srcdir" >&2
+  # the staged dir for THIS CARCH. A leftover sibling-arch dir (a previous
+  # makepkg run in the same srcdir) must never win over the current build.
+  local arch_dir
+  case "${CARCH}" in
+    x86_64)  arch_dir="linux_x64" ;;
+    aarch64) arch_dir="linux_arm64" ;;
+    *) echo "error: unsupported CARCH '${CARCH}'" >&2; exit 1 ;;
+  esac
+  local staged="${srcdir}/Grok_Bot_${pkgver}_${arch_dir}"
+  if [[ ! -d "${staged}" ]]; then
+    echo "error: no staged Grok_Bot_${pkgver}_${arch_dir} dir found under srcdir" >&2
     ls -R "${srcdir}" | head -n 100 >&2
     exit 1
   fi
