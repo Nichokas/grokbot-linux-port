@@ -27,9 +27,21 @@ grokbot-linux-port.spec          RPM spec for COPR — prebuilt variant, mirrors
 
 ## Packaging flows
 
+- **Architectures**: x86_64 and aarch64. `port.sh` builds natively (native
+  modules are compiled against the target Electron ABI, no cross toolchain),
+  so `auto-update.yml`'s build matrix pairs each arch with a runner of that
+  arch — `namespace-profile-grokbot` (x64) and `namespace-profile-grokbot-arm`
+  (arm64). Every downstream leg is per-arch: AUR `-bin` uses
+  `sha256sums_x86_64`/`sha256sums_aarch64`, the spec carries both tarballs in
+  `Source0`/`Source1` and `%ifarch`-selects one, and `ppa-publish.yml` runs an
+  `amd64`/`arm64` matrix. The win32 payload is always fetched from
+  `win32-x64` — it only contributes JS and assets, since every native binary
+  is re-sourced for `linux-<target>`.
 - **AUR**: `update-aur.sh` keeps `pkgver`/`sha256sums`/`.SRCINFO` in sync.
   `-bin` checksum comes from the release job's freshly uploaded bytes
-  (`--bin-sum`) to avoid GitHub CDN propagation races.
+  (`--bin-sum`) to avoid GitHub CDN propagation races. The `-bin` bump is
+  skipped unless **both** arch sums are present, so a half-published matrix
+  can't leave one branch with a stale digest.
 - **COPR**: the project uses the **rpkg source method** — COPR clones this
   repo and runs `rpkg srpm`, which requires `grokbot-linux-port.spec` at the
   repo root (name must match the repo). `update-spec.sh` keeps

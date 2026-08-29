@@ -92,8 +92,8 @@ jobs:
   # installers nest it under $PLUGINSDIR/), fuses the payload with Electron
   # 42.1.0 linux-x64, rebuilds the six native modules via @electron/rebuild,
   # fixes chrome-sandbox permissions, and emits tar.gz (always) and
-  # AppImage (best-effort via AppDir + appimagetool). Arch matrix is present
-  # so arm64 can be enabled by expanding `arch`.
+  # AppImage (best-effort via AppDir + appimagetool). One runner per arch —
+  # the rebuilds are native, so arm64 needs an arm64 runner.
   # -----------------------------------------------------------------------
   build:
     needs: detect-version
@@ -107,11 +107,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64]
-        # To enable arm64, extend to [x64, arm64] and add a conditional
-        # electron arch mapping inside the build step (x64 -> x64, arm64 ->
-        # arm64) and adjust the Electron download URL accordingly.
-    runs-on: namespace-profile-grokbot
+        # port.sh builds natively (native modules are compiled against the
+        # target Electron ABI, no cross toolchain), so each arch needs a
+        # runner of that arch — hence the explicit arch->runner pairing
+        # instead of a bare `arch:` list.
+        include:
+          - arch: x64
+            runner: namespace-profile-grokbot
+          - arch: arm64
+            runner: namespace-profile-grokbot-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
     steps:
@@ -201,7 +206,10 @@ jobs:
         run: |
           set -euo pipefail
           echo "Building Grok Bot ${GROK_VERSION} for linux-${{ matrix.arch }} (Electron ${ELECTRON_VERSION})"
-          bash scripts/port.sh "${GROK_VERSION}"
+          # --arch is passed explicitly rather than left to port.sh's uname
+          # detection: a mislabelled runner then fails loudly instead of
+          # silently publishing a second x64 tarball under the arm64 name.
+          bash scripts/port.sh --arch "${{ matrix.arch }}" "${GROK_VERSION}"
           echo "Build artefacts:"
           ls -lh dist/ || true
 
@@ -389,11 +397,12 @@ jobs:
           body: |
             Linux port of Grok Bot `${{ needs.detect-version.outputs.version }}`.
 
-            Built from the official Windows distribution via wine-less extraction (`7z x`, recursive `app-64.7z` locate) fused with Electron 42.1.0 (linux-x64), with native modules rebuilt via `@electron/rebuild`.
+            Built from the official Windows distribution via wine-less extraction (`7z x`, recursive `app-64.7z` locate) fused with Electron 42.1.0 (linux-x64 / linux-arm64), with native modules rebuilt via `@electron/rebuild`.
 
             **Install**
 
             ```bash
+            # replace x64 with arm64 on aarch64
             tar -xzf Grok_Bot_${{ needs.detect-version.outputs.version }}_linux_x64.tar.gz
             cd Grok_Bot_${{ needs.detect-version.outputs.version }}_linux_x64
             # chrome-sandbox requires setuid when not using --no-sandbox
@@ -403,8 +412,8 @@ jobs:
 
             **Artefacts**
 
-            - `Grok_Bot_<version>_linux_x64.tar.gz` — portable archive
-            - `Grok_Bot_<version>_x86_64.AppImage` — AppImage (best-effort, requires squashfs-tools + appimagetool)
+            - `Grok_Bot_<version>_linux_x64.tar.gz` / `_linux_arm64.tar.gz` — portable archives
+            - `Grok_Bot_<version>_x86_64.AppImage` / `_aarch64.AppImage` — AppImage (best-effort, requires squashfs-tools + appimagetool)
 
             *Automated build — triggered by daily HEAD-probing of `https://downloads.cursor.com/grokbot/stable/win32-x64/<version>/Grok_Bot_<version>_Setup.exe`.*
           files: |

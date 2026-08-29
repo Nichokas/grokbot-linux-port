@@ -18,6 +18,14 @@ permissions:
 
 jobs:
   ppa-publish:
+    # One leg per arch: Launchpad wants a separate source upload per
+    # Architecture:, and build-deb.sh bakes the matching tarball into it.
+    # Source packages are arch-independent to assemble, so both legs run on
+    # x86 runners.
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -30,7 +38,11 @@ jobs:
           set -euo pipefail
           ver="$(cat VERSION | tr -d '[:space:]')"
           echo "VERSION=${ver}"
-          tarball="Grok_Bot_${ver}_linux_x64.tar.gz"
+          case "${{ matrix.arch }}" in
+            amd64) kernel="linux_x64" ;;
+            arm64) kernel="linux_arm64" ;;
+          esac
+          tarball="Grok_Bot_${ver}_${kernel}.tar.gz"
           mkdir -p dist
           # Distinguish "asset missing" (skip the leg) from a real download
           # failure (propagate as an error). A blanket `gh release download`
