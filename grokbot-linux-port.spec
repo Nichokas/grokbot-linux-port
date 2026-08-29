@@ -10,7 +10,7 @@
 # `rpkg srpm`, which expects this spec at the repository root.
 
 Name:           grokbot-linux-port
-Version:        0.29.0
+Version:        0.30.0
 Release:        1%{?dist}
 Summary:        Grok Bot desktop — wine-less Linux port (prebuilt tarball)
 
@@ -82,12 +82,12 @@ tar -xf %{SOURCE1}
 # Until the first arm64 release publishes, no digest exists to pin; skip the
 # belt-and-braces check rather than fail the build. update-spec.sh --sum-arm64
 # replaces this line with the real echo|sha256sum -c on the first arm64 bump.
-echo "arm64 sha check pending first arm64 release (ARM64_SUM_PLACEHOLDER)"
+echo "67cb0332c40f5e3140f9f709c4c26065df00b9df5c4e53f15ad14aef44fafc9d  %{_sourcedir}/Grok_Bot_0.30.0_linux_arm64.tar.gz" | sha256sum -c -
 cd Grok_Bot_%{version}_linux_arm64
 %else
 rm -rf Grok_Bot_%{version}_linux_x64
 tar -xf %{SOURCE0}
-echo "0ed63f0beae1d5a61ec7b1ebb0d1d1931522c1c28ced0532c451cf4f294b3912  %{_sourcedir}/Grok_Bot_%{version}_linux_x64.tar.gz" | sha256sum -c -
+echo "3623162e9442c504c43fb6df144e7aeecf9b5eb831040c70827adc98b5b49597  %{_sourcedir}/Grok_Bot_0.30.0_linux_x64.tar.gz" | sha256sum -c -
 cd Grok_Bot_%{version}_linux_x64
 %endif
 
@@ -212,6 +212,9 @@ fi
 %{_bindir}/grokbot
 
 %changelog
+* Sat Aug 29 2026 Nichokas <nichokas@users.noreply.github.com> - 0.30.0-1
+- Sync with upstream release v0.30.0 (x64 sha256 3623162e9442c504c43fb6df144e7aeecf9b5eb831040c70827adc98b5b49597) (arm64 sha256 67cb0332c40f5e3140f9f709c4c26065df00b9df5c4e53f15ad14aef44fafc9d).
+
 * Thu Aug 27 2026 Nichokas <nichokas@users.noreply.github.com> - 0.29.0-1
 - Sync with upstream release v0.29.0 (tarball sha256 0ed63f0beae1d5a61ec7b1ebb0d1d1931522c1c28ced0532c451cf4f294b3912).
 
