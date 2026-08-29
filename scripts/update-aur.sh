@@ -166,6 +166,7 @@ t = pkgbuild.read_text()
 def field(name):
     m = re.search(rf"^{name}=([^\n]+)", t, re.MULTILINE)
     return m.group(1).strip() if m else ""
+PKGNAME_FALLBACK = field("pkgname").strip("\"'")
 if srcinfo.exists():
     s = srcinfo.read_text()
     s = re.sub(r"(?m)^\s*pkgver =.*", f"	pkgver = {field('pkgver').strip() or VER_FALLBACK}", s, count=1)
@@ -174,21 +175,21 @@ if srcinfo.exists():
         s = re.sub(r"(?m)^\s*pkgrel =.*", f"	pkgrel = {m_rel.group(1).strip()}", s, count=1)
     # Sync source_x86_64 / source_aarch64 (and any other source_*) lines,
     # not just source=. The -bin PKGBUILD uses per-arch source arrays.
-    def replace_source(t_pat, val):
-        nonlocal s
+    def replace_source(s, t_pat, val):
         if not val:
-            return
-        # expand ${pkgver} / $pkgver
-        v = val.replace("${pkgver}", VER_FALLBACK).replace("$pkgver", VER_FALLBACK)
-        s = re.sub(rf"(?m)^\s*{re.escape(t_pat)} =.*", f"\t{t_pat} = {v}", s, count=1)
+            return s
+        # makepkg writes the entry fully expanded, so mirror its substitutions
+        for ref, ref_val in (("pkgver", VER_FALLBACK), ("pkgname", PKGNAME_FALLBACK)):
+            val = val.replace(f"${{{ref}}}", ref_val).replace(f"${ref}", ref_val)
+        return re.sub(rf"(?m)^\s*{re.escape(t_pat)} =.*", f"\t{t_pat} = {val}", s, count=1)
     for m_src in re.finditer(r"^source(_[A-Za-z0-9_]+)?=([^\n]+)", t, re.MULTILINE):
         var = m_src.group(0).split("=", 1)[0]
-        # Pull the URL out: source_x86_64=(...::URL) — same shape for plain source=
-        raw = m_src.group(2)
-        # raw looks like ('name::url') — extract url
-        url_m = re.search(r"::([^'\")]+)", raw)
-        if url_m:
-            replace_source(var, url_m.group(1).strip())
+        # Keep the whole quoted entry: makepkg preserves the 'name::url'
+        # rename prefix in .SRCINFO, and the PKGBUILD's build()/package()
+        # reference that renamed file, so stripping it would desync metadata.
+        entry_m = re.search(r"""['"]([^'"]+)['"]""", m_src.group(2))
+        if entry_m:
+            s = replace_source(s, var, entry_m.group(1).strip())
     m = re.search(r"sha256sums=\(([^)]*)\)", t)
     if m:
         sums = re.findall(r"'([^']*)'|\"([^\"]*)\"", m.group(1))
@@ -238,10 +239,9 @@ fi
 
 # -bin: fetch each arch's tarball sum independently. Caller-supplied sums
 # (--bin-sum-x64 / --bin-sum-arm64) take precedence so the release job can
-# hand off fresh bytes without a re-download race. Hashing defaults to x64
-# only when the caller did not pass anything; arm64 stays empty unless
-# explicitly supplied, which is the current CI default (build matrix has
-# x64 enabled, arm64 still rolling out).
+# hand off fresh bytes without a re-download race. Hashing the release URL is
+# the fallback for a manual invocation; an arch whose tarball is absent from
+# the release leaves its slot empty and the -bin guard below skips the bump.
 if [[ -z "${BIN_SUM_X64}" ]]; then
   BIN_TARBALL_URL_X64="https://github.com/Nichokas/grokbot-linux-port/releases/download/v${VER}/Grok_Bot_${VER}_linux_x64.tar.gz"
   echo "Hashing release tarball: ${BIN_TARBALL_URL_X64}" >&2
