@@ -159,12 +159,12 @@ if sum_x64:
         t,
         count=1,
     )
-# Update the arm64 sha line. Before the first arm64 release the spec carries
-# a pending-marker line (no digest exists to pin yet); replace that OR an
-# existing real digest.
+# Update the arm64 sha line. Matching runs to end of line so the whole
+# `echo "<digest>  <path>" | sha256sum -c -` is replaced; an anchor that
+# stopped at the closing quote silently left stale digests behind.
 if sum_arm64:
     t = re.sub(
-        r'(?m)^echo "(?:(?:ARM64_SUM_PLACEHOLDER|arm64 sha check pending[^\n]*|[0-9a-f]{64})  %\{_sourcedir\}/Grok_Bot_[^/"]*_linux_arm64\.tar\.gz"\s*\|\s*sha256sum -c -|arm64 sha check pending[^\n]*)"',
+        r'(?m)^echo "[0-9a-f]{64}  %\{_sourcedir\}/Grok_Bot_[^"]*_linux_arm64\.tar\.gz"[^\n]*$',
         f'echo "{sum_arm64}  %{{_sourcedir}}/Grok_Bot_{ver}_linux_arm64.tar.gz" | sha256sum -c -',
         t,
         count=1,
@@ -175,6 +175,11 @@ t = re.sub(
     t,
     count=1,
 )
+# A digest line left on an older version makes %prep run sha256sum against a
+# tarball the SRPM does not carry, so that chroot fails. Fail here instead.
+stale = sorted(set(re.findall(r"Grok_Bot_(\d+\.\d+\.\d+)_linux_(?:x64|arm64)\.tar\.gz", t)) - {ver})
+if stale:
+    raise SystemExit(f"error: spec still pins tarball version(s) {', '.join(stale)} after rewrite")
 spec.write_text(t)
 parts = [f"Version={ver}", f"Release={rel}"]
 if sum_x64:
