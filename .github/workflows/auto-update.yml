@@ -276,9 +276,9 @@ jobs:
   # -----------------------------------------------------------------------
   # spec-lint — validate the RPM spec on PRs touching it
   #
-  # Same idea as aur-lint for the COPR side: rpmbuild -bs parses the spec
-  # fully (macros, %prep/%install/%files) without downloading Source0, so a
-  # broken spec fails here instead of inside COPR's srpm stage.
+  # Same idea as aur-lint for the COPR side. rpmbuild -bs only parses the
+  # spec, so scriptlet bugs survive it; the smoke step below runs the real
+  # %install/%files against a stub payload to catch those before COPR does.
   # -----------------------------------------------------------------------
   spec-lint:
     if: github.event_name == 'pull_request'
@@ -306,6 +306,51 @@ jobs:
           if command -v rpmlint >/dev/null 2>&1; then
             rpmlint grokbot-linux-port.spec || echo "  (rpmlint warnings — non-fatal)"
           fi
+
+      - name: Smoke-build the RPM against a stub payload
+        run: |
+          set -euo pipefail
+          # A COPR failure at %install is invisible to rpmbuild -bs, so build
+          # both arch RPMs for real against a stub tarball shaped like the
+          # release payload. update-spec.sh supplies the matching digests, so
+          # this covers the bump script's rewrite too. File modes are not
+          # asserted: brp-mangle-shebangs strips the executable bit from
+          # non-ELF stubs, so any mode check here would test the stubs.
+          ver="$(sed -n 's/^Version:[[:space:]]*//p' grokbot-linux-port.spec | tr -d '[:space:]')"
+          work=/tmp/rpmsmoke
+          rm -rf "${work}"
+          mkdir -p "${work}/SOURCES"
+          for arch in x64 arm64; do
+            dir="${work}/Grok_Bot_${ver}_linux_${arch}"
+            mkdir -p "${dir}/resources/app.asar.unpacked/dist"
+            printf 'grok-bot stub\n' > "${dir}/grok-bot"
+            printf 'chrome-sandbox stub\n' > "${dir}/chrome-sandbox"
+            printf 'icon stub\n' > "${dir}/grok-bot.png"
+            printf 'asar stub\n' > "${dir}/resources/app.asar"
+            chmod 700 "${dir}/resources/app.asar.unpacked"
+            tar -czf "${work}/SOURCES/Grok_Bot_${ver}_linux_${arch}.tar.gz" \
+              -C "${work}" "Grok_Bot_${ver}_linux_${arch}"
+          done
+          bash scripts/update-spec.sh \
+            --sum-x64 "$(sha256sum "${work}/SOURCES/Grok_Bot_${ver}_linux_x64.tar.gz" | awk '{print $1}')" \
+            --sum-arm64 "$(sha256sum "${work}/SOURCES/Grok_Bot_${ver}_linux_arm64.tar.gz" | awk '{print $1}')" \
+            "${ver}"
+          for target in x86_64 aarch64; do
+            rpmbuild -bb --target "${target}" --define "_topdir ${work}" grokbot-linux-port.spec
+            for path in \
+              /opt/grokbot-linux-port/chrome-sandbox \
+              /opt/grokbot-linux-port/grok-bot \
+              /usr/bin/grok-bot \
+              /usr/bin/grokbot \
+              /usr/share/applications/grok-bot.desktop \
+              /usr/share/icons/hicolor/256x256/apps/grok-bot.png \
+              /usr/share/licenses/grokbot-linux-port/LICENSE
+            do
+              rpm -qpl "${work}/RPMS/${target}"/*.rpm | grep -Fqx "${path}" \
+                || { echo "${target} RPM is missing ${path}"; exit 1; }
+            done
+          done
+          git checkout -- grokbot-linux-port.spec
 
   # -----------------------------------------------------------------------
   # release — publish GitHub Release, upload artefacts, bump VERSION
