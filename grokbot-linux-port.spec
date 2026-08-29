@@ -30,6 +30,14 @@ Source1:        %{url}/releases/download/v%{version}/Grok_Bot_%{version}_linux_a
 # buildable on whichever arch the chroot is.
 %global debug_package %{nil}
 
+# Payload dir, selected per build arch. Single source of truth for the tarball
+# directory name so %prep and %install cannot disagree about the working dir.
+%ifarch aarch64
+%global payload_dir Grok_Bot_%{version}_linux_arm64
+%else
+%global payload_dir Grok_Bot_%{version}_linux_x64
+%endif
+
 BuildRequires:  coreutils
 BuildRequires:  findutils
 BuildRequires:  tar
@@ -77,18 +85,15 @@ exit 1
 # per-source unpack flags proved unreliable across rpm versions (rpm 6
 # unpacks Source0 alongside -b 1), so the extraction is spelled out.
 %ifarch aarch64
-rm -rf Grok_Bot_%{version}_linux_arm64
+rm -rf %{payload_dir}
 tar -xf %{SOURCE1}
-# Until the first arm64 release publishes, no digest exists to pin; skip the
-# belt-and-braces check rather than fail the build. update-spec.sh --sum-arm64
-# replaces this line with the real echo|sha256sum -c on the first arm64 bump.
 echo "67cb0332c40f5e3140f9f709c4c26065df00b9df5c4e53f15ad14aef44fafc9d  %{_sourcedir}/Grok_Bot_0.30.0_linux_arm64.tar.gz" | sha256sum -c -
-cd Grok_Bot_%{version}_linux_arm64
+cd %{payload_dir}
 %else
-rm -rf Grok_Bot_%{version}_linux_x64
+rm -rf %{payload_dir}
 tar -xf %{SOURCE0}
 echo "3623162e9442c504c43fb6df144e7aeecf9b5eb831040c70827adc98b5b49597  %{_sourcedir}/Grok_Bot_0.30.0_linux_x64.tar.gz" | sha256sum -c -
-cd Grok_Bot_%{version}_linux_x64
+cd %{payload_dir}
 %endif
 
 # The tarball keeps NSIS-derived restrictive modes (drwx------ on
@@ -97,6 +102,13 @@ cd Grok_Bot_%{version}_linux_x64
 chmod -R u+rwX,go+rX,go-w .
 
 %install
+# Each scriptlet starts fresh in the builddir, so %prep's cd does not carry
+# over. Without re-entering the payload dir, `cp -a .` copies the builddir
+# (which contains BUILDROOT) into itself. %files resolves -f and %license
+# relative to the builddir, so keep those two artifacts there.
+builddir="$(pwd)"
+cd %{payload_dir}
+
 install -dm755 %{buildroot}/opt/%{name} \
                %{buildroot}%{_bindir} \
                %{buildroot}%{_datadir}/applications \
@@ -132,7 +144,7 @@ DESKTOP
 # a PNG is found. Current tarballs keep it inside packed app.asar, so a
 # filesystem hunt fails — extract from asar in that case. A -f filelist must
 # contain at least one real entry, hence anchoring it on the desktop file.
-echo "%{_datadir}/applications/grok-bot.desktop" > extra.filelist
+echo "%{_datadir}/applications/grok-bot.desktop" > "${builddir}/extra.filelist"
 icon=""
 for cand in \
   grok-bot.png \
@@ -187,11 +199,11 @@ PY
 fi
 if [ -n "${icon}" ] && [ -f "${icon}" ]; then
   install -m644 "${icon}" %{buildroot}%{_datadir}/icons/hicolor/256x256/apps/grok-bot.png
-  echo "%{_datadir}/icons/hicolor/256x256/apps/grok-bot.png" >> extra.filelist
+  echo "%{_datadir}/icons/hicolor/256x256/apps/grok-bot.png" >> "${builddir}/extra.filelist"
 fi
 
 # Upstream EULA lives inside app.asar; ship a pointer file as the license.
-cat > LICENSE <<'LICENSE'
+cat > "${builddir}/LICENSE" <<'LICENSE'
 Grok Bot is proprietary software. This package fetches the prebuilt Linux
 tarball published at https://github.com/Nichokas/grokbot-linux-port/releases.
 See upstream terms at https://grok.com and inside resources/app.asar.

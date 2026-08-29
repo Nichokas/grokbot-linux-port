@@ -104,6 +104,13 @@ Notes learned the hard way:
   because GDB chokes on the bundled Electron binaries.
 - `mock` needs the `mock` group / sudo; host `rpmbuild --rebuild` is enough
   for this noarch-free prebuilt package.
+- Every rpm scriptlet starts fresh in the builddir, so `%prep`'s `cd` does not
+  carry into `%install`. Both re-enter `%{payload_dir}` (the `%ifarch`-selected
+  tarball dir); `extra.filelist` and `LICENSE` stay in the builddir because
+  that is where `%files -f` and `%license` look. `rpmbuild -bs` never runs
+  those scriptlets, which is why the `spec-lint` job also builds both arch
+  RPMs against a stub payload — that smoke is the regression test for anything
+  touching `%prep`/`%install`/`%files`.
 
 ## Conventions
 
