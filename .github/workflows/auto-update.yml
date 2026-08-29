@@ -313,9 +313,11 @@ jobs:
           # A COPR failure at %install is invisible to rpmbuild -bs, so build
           # both arch RPMs for real against a stub tarball shaped like the
           # release payload. update-spec.sh supplies the matching digests, so
-          # this covers the bump script's rewrite too. File modes are not
-          # asserted: brp-mangle-shebangs strips the executable bit from
-          # non-ELF stubs, so any mode check here would test the stubs.
+          # this covers the bump script's rewrite too; the rewritten spec is
+          # left in place because the checkout is ephemeral and this is the
+          # job's last step. File modes are not asserted:
+          # brp-mangle-shebangs strips the executable bit from non-ELF stubs,
+          # so any mode check here would test the stubs.
           ver="$(sed -n 's/^Version:[[:space:]]*//p' grokbot-linux-port.spec | tr -d '[:space:]')"
           work=/tmp/rpmsmoke
           rm -rf "${work}"
@@ -353,7 +355,6 @@ jobs:
                 || { echo "${target} RPM is missing ${path}"; exit 1; }
             done
           done
-          git checkout -- grokbot-linux-port.spec
 
   # -----------------------------------------------------------------------
   # release — publish GitHub Release, upload artefacts, bump VERSION
