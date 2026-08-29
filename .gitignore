@@ -25,6 +25,7 @@ aur/**/*.tar.zst
 aur/**/*.zip
 
 # Temp / workdirs
+.work/
 tmp/
 tmp_*/
 tmp-*/

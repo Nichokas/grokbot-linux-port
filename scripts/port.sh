@@ -462,30 +462,31 @@ main() {
     need_rebuild=false
   fi
 
+  # Unpack app.asar for Linux runtime JS patches. These touch
+  # dist/electron-main/main.cjs and dist/renderer/assets/index-*.js and do
+  # not require dist/deps. The native-blob mirror below is a separate
+  # prerequisite — the patcher must not sit inside that gate (see #5 review).
+  local asar_tmp="${workdir}/asar-unpacked"
+  mkdir -p "${asar_tmp}"
+  local has_asar=false
+  if command -v asar >/dev/null 2>&1 || npx --yes @electron/asar --help >/dev/null 2>&1; then
+    has_asar=true
+  fi
+  if [[ "${has_asar}" != "true" ]]; then
+    echo "error: @electron/asar not available; Linux runtime patches cannot run" >&2
+    exit 1
+  fi
+  echo "Unpacking app.asar for Linux runtime patches..." >&2
+  if npx --yes @electron/asar extract "${staged}/resources/app.asar" "${asar_tmp}" 2>/dev/null; then
+    echo "app.asar extracted to ${asar_tmp}" >&2
+  elif command -v asar >/dev/null 2>&1 && asar extract "${staged}/resources/app.asar" "${asar_tmp}" 2>/dev/null; then
+    echo "app.asar extracted via asar CLI" >&2
+  else
+    echo "error: asar extraction failed; Linux runtime patches cannot run" >&2
+    exit 1
+  fi
+
   if [[ "${need_rebuild}" == "true" ]]; then
-    local asar_tmp="${workdir}/asar-unpacked"
-    mkdir -p "${asar_tmp}"
-
-    local has_asar=false
-    if command -v asar >/dev/null 2>&1 || npx --yes @electron/asar --help >/dev/null 2>&1; then
-      has_asar=true
-    fi
-
-    if [[ "${has_asar}" == "true" ]]; then
-      echo "Unpacking app.asar for native rebuild..." >&2
-      if npx --yes @electron/asar extract "${staged}/resources/app.asar" "${asar_tmp}" 2>/dev/null; then
-        echo "app.asar extracted to ${asar_tmp}" >&2
-      elif command -v asar >/dev/null 2>&1 && asar extract "${staged}/resources/app.asar" "${asar_tmp}" 2>/dev/null; then
-        echo "app.asar extracted via asar CLI" >&2
-      else
-        echo "warn: asar extraction failed — native rebuild will target unpacked tree only" >&2
-        asar_tmp=""
-      fi
-    else
-      echo "warn: @electron/asar not available — native rebuild will target unpacked tree only" >&2
-      asar_tmp=""
-    fi
-
     # Canonical source for native modules on this build.
     local deps_root="${staged}/resources/app.asar.unpacked/dist/deps"
     if [[ ! -d "${deps_root}" ]]; then
@@ -859,17 +860,6 @@ PYPATCH
         cp -f "$pre" "${asar_tmp}/dist/deps/${rel}"
       done
 
-      local asar_cmd
-      if command -v asar >/dev/null 2>&1; then
-        asar_cmd="asar"
-      else
-        asar_cmd="npx --yes @electron/asar"
-      fi
-      echo "Repacking app.asar..." >&2
-      # shellcheck disable=SC2086
-      if ! ${asar_cmd} pack "${asar_tmp}" "${staged}/resources/app.asar" 2>&1; then
-        echo "warn: asar repack failed — unpacked tree carries the fixes, packed copy remains stale" >&2
-      fi
     fi
 
     # Hard gate: fail if any *loadable* native is still a Windows PE. A
@@ -902,6 +892,28 @@ PYPATCH
       printf '  %s\n' "${mz_list}" | head -n 5 >&2
     fi
     echo "Native rebuild completed." >&2
+  fi
+
+  # Linux runtime JS patches are independent of the native-blob mirror.
+  # Fail the build if they do not run — shipping the stock asar is the
+  # white-window / hung EnsureSandBox desktop this exists to prevent.
+  if [[ -z "${asar_tmp:-}" || ! -d "${asar_tmp}" ]]; then
+    echo "error: app.asar extract missing; Linux runtime patches did not run" >&2
+    exit 1
+  fi
+  echo "Applying Linux runtime patches to app.asar extract..." >&2
+  python3 "${SCRIPT_DIR}/patch-linux-runtime.py" "${asar_tmp}"
+  local asar_cmd
+  if command -v asar >/dev/null 2>&1; then
+    asar_cmd="asar"
+  else
+    asar_cmd="npx --yes @electron/asar"
+  fi
+  echo "Repacking app.asar..." >&2
+  # shellcheck disable=SC2086
+  if ! ${asar_cmd} pack "${asar_tmp}" "${staged}/resources/app.asar" 2>&1; then
+    echo "error: asar repack failed after Linux runtime patches" >&2
+    exit 1
   fi
 
   # -----------------------------------------------------------------------
