@@ -337,6 +337,9 @@ jobs:
             "${ver}"
           for target in x86_64 aarch64; do
             rpmbuild -bb --target "${target}" --define "_topdir ${work}" grokbot-linux-port.spec
+            # Listed to a file, not piped: grep -q exits on the first hit and
+            # pipefail would then report the SIGPIPE'd rpm as the failure.
+            rpm -qpl "${work}/RPMS/${target}"/*.rpm > "${work}/${target}.list"
             for path in \
               /opt/grokbot-linux-port/chrome-sandbox \
               /opt/grokbot-linux-port/grok-bot \
@@ -346,7 +349,7 @@ jobs:
               /usr/share/icons/hicolor/256x256/apps/grok-bot.png \
               /usr/share/licenses/grokbot-linux-port/LICENSE
             do
-              rpm -qpl "${work}/RPMS/${target}"/*.rpm | grep -Fqx "${path}" \
+              grep -Fqx "${path}" "${work}/${target}.list" \
                 || { echo "${target} RPM is missing ${path}"; exit 1; }
             done
           done
