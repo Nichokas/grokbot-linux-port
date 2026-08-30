@@ -603,7 +603,10 @@ jobs:
           set -euo pipefail
           bash -n scripts/build-deb.sh
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends debhelper devscripts lintian fakeroot
+          # fakeroot + build-essential are for the binary smoke build below: the
+          # runner image ships gcc but not the build-essential metapackage that
+          # dpkg-checkbuilddeps demands.
+          sudo apt-get install -y --no-install-recommends debhelper devscripts lintian fakeroot build-essential
           tmp="$(mktemp -d -t deb-lint-XXXXXX)"
           trap 'rm -rf "${tmp}"' EXIT
           # Stub tarball mirrors the real filename per arch; build-deb.sh's
