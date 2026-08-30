@@ -204,6 +204,15 @@ grokbot-linux-port: dir-or-file-in-opt
 grokbot-linux-port: no-manual-page
 OVR
 
+  # The native source package IS the prebuilt payload: every ELF in it (the
+  # Electron binaries, the ABI-rebuilt native modules) has no shippable source,
+  # which is the whole premise of this repo. Without this, lintian's
+  # source-is-missing turns each one into an error.
+  cat > "${PKG_DIR}/debian/source/lintian-overrides" <<'SOVR'
+# Prebuilt proprietary payload — see debian/copyright; upstream ships no source.
+grokbot-linux-port source: source-is-missing
+SOVR
+
   cat > "${PKG_DIR}/debian/copyright" <<COPY
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Source: https://github.com/Nichokas/grokbot-linux-port
