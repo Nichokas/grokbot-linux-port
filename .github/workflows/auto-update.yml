@@ -652,7 +652,10 @@ jobs:
           set -euo pipefail
           bash -n scripts/build-deb.sh
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends debhelper devscripts lintian
+          # fakeroot + build-essential are for the binary smoke build below: the
+          # runner image ships gcc but not the build-essential metapackage that
+          # dpkg-checkbuilddeps demands.
+          sudo apt-get install -y --no-install-recommends debhelper devscripts lintian fakeroot build-essential
           tmp="$(mktemp -d -t deb-lint-XXXXXX)"
           trap 'rm -rf "${tmp}"' EXIT
           # Stub tarball mirrors the real filename per arch; build-deb.sh's
@@ -665,7 +668,12 @@ jobs:
             mkdir -p "${tmp}/Grok_Bot_0.0.1_${kernel}/resources" "${tmp}/Grok_Bot_0.0.1_${kernel}/locales"
             printf '#!/bin/sh\necho grok-bot stub\n' > "${tmp}/Grok_Bot_0.0.1_${kernel}/grok-bot"
             chmod +x "${tmp}/Grok_Bot_0.0.1_${kernel}/grok-bot"
-            touch "${tmp}/Grok_Bot_0.0.1_${kernel}/chrome-sandbox"
+            # chrome-sandbox is a real ELF carrying split DWARF: dh's ELF
+            # helpers only chew on actual binaries, so a touch'd file (or a
+            # shell script) let a dh_dwz abort reach Launchpad unnoticed.
+            printf 'int main(void){return 0;}\n' > "${tmp}/stub.c"
+            gcc -g -gsplit-dwarf -o "${tmp}/chrome-sandbox" "${tmp}/stub.c"
+            mv "${tmp}/chrome-sandbox" "${tmp}/Grok_Bot_0.0.1_${kernel}/chrome-sandbox"
             echo "stub" > "${tmp}/Grok_Bot_0.0.1_${kernel}/resources/app.asar"
             stub="/tmp/Grok_Bot_0.0.1_${kernel}.tar.gz"
             tar -czf "${stub}" -C "${tmp}" "Grok_Bot_0.0.1_${kernel}"
@@ -683,6 +691,28 @@ jobs:
             grep -q "grokbot-linux-port_0.0.1~ppa[0-9]*~noble1+${arch}" "/tmp/deb-lint-out/${arch}/noble/"*.dsc
             # --fail-on error: warnings don't fail the gate, errors do
             lintian --fail-on error "/tmp/deb-lint-out/${arch}/noble/"*_source.changes
+            # Only the source package ships to Launchpad, but the builder then
+            # runs `dh binary` — that is where dh_dwz/dh_strip/dh_makeshlibs/
+            # dh_shlibdeps run and where every 0.30.0~ppa1 build died. Prove
+            # the binary sequence completes here (amd64 only; the arm64 leg
+            # would need a foreign-arch build for no extra coverage).
+            if [[ "${arch}" == "amd64" ]]; then
+              bin="$(mktemp -d -t deb-bin-XXXXXX)"
+              dpkg-source -x "/tmp/deb-lint-out/amd64/noble/"*.dsc "${bin}/pkg" >/dev/null
+              ( cd "${bin}/pkg" && DEB_BUILD_OPTIONS=noautodbgsym dpkg-buildpackage -b -us -uc -rfakeroot )
+              deb="$(ls "${bin}"/*.deb)"
+              # A shlibs file would advertise the bundle's private libs as
+              # provided by this package; chrome-sandbox must stay setuid.
+              if dpkg-deb --ctrl-tarfile "${deb}" | tar t | grep -qx './shlibs'; then
+                echo "::error::dh_makeshlibs published a shlibs file for the vendored /opt bundle" >&2
+                exit 1
+              fi
+              dpkg-deb -c "${deb}" | grep -qE '^-rwsr-xr-x .*/chrome-sandbox$' || {
+                echo "::error::chrome-sandbox lost its setuid bit in the binary package" >&2
+                exit 1
+              }
+              rm -rf "${bin}"
+            fi
           done
 
   # -----------------------------------------------------------------------

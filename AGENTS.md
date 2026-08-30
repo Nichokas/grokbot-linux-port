@@ -59,6 +59,17 @@ grokbot-linux-port.spec          RPM spec for COPR — prebuilt variant, mirrors
     Launchpad rejects.
   - Static deps with t64 names (`libgtk-3-0t64 | libgtk-3-0` etc.); no
     `dpkg-shlibdeps` — the builder cannot resolve dynamically.
+  - `debian/rules` no-ops `dh_dwz`, `dh_strip`, `dh_makeshlibs` and
+    `dh_shlibdeps`: the /opt payload is a prebuilt vendor bundle with private
+    libs, `dwz` aborts on Electron's `.debug_addr`/missing `.debug_info` (this
+    killed every `0.30.0~ppa1` build), and `dh_makeshlibs` would advertise the
+    bundled libvulkan/libffmpeg as provided by this package. Same intent as the
+    spec's `%global debug_package %{nil}` — the .deb ships the tarball bytes
+    unmodified.
+  - `deb-lint` (PR gate) builds the stub *binary* package too, since the
+    Launchpad-only failures live in `dh binary`; its stub chrome-sandbox is a
+    real ELF with split DWARF on purpose, and it asserts no `shlibs` file and a
+    setuid chrome-sandbox. Keep it that way — a touch'd stub proves nothing.
   - GPG signing required: the `PPA_GPG_PRIVATE_KEY` secret (armored key, no
     passphrase, registered in Launchpad) signs `.dsc`/`.changes`; unsigned
     uploads are rejected. `ppa-publish.yml` runs `dput
