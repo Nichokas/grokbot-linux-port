@@ -259,6 +259,25 @@ override_dh_fixperms:
 	dh_fixperms
 	if [ -f debian/grokbot-linux-port/opt/grokbot-linux-port/chrome-sandbox ]; then chmod 4755 debian/grokbot-linux-port/opt/grokbot-linux-port/chrome-sandbox || true; fi
 
+# The payload is a prebuilt vendor bundle whose libraries are private to
+# /opt/grokbot-linux-port, so the ELF-mangling half of dh binary is disabled —
+# same reason the RPM sets %global debug_package %{nil}:
+#   dwz        Electron's binaries carry no .debug_info and libvulkan.so.1 has
+#              a .debug_addr dwz rejects; it exits 1 and fails the build.
+#   strip      nothing to extract, and rewriting the ABI-rebuilt native modules
+#              or the setuid chrome-sandbox buys nothing.
+#   makeshlibs would publish shlibs claiming this package provides the bundled
+#              libvulkan/libffmpeg, plus a pointless ldconfig trigger.
+#   shlibdeps  dpkg-shlibdeps cannot resolve the bundled private libs (and the
+#              builder has no network); runtime deps are static in control.
+override_dh_dwz:
+
+override_dh_strip:
+
+override_dh_makeshlibs:
+
+override_dh_shlibdeps:
+
 # Helper extracted at build time — keeps the asar parser out of shell quoting hell
 RULES
   chmod 755 "${PKG_DIR}/debian/rules"

@@ -11,7 +11,7 @@
 
 Name:           grokbot-linux-port
 Version:        0.30.0
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        Grok Bot desktop — wine-less Linux port (prebuilt tarball)
 
 # Upstream EULA lives inside resources/app.asar; see the installed LICENSE.
@@ -212,6 +212,10 @@ fi
 %{_bindir}/grokbot
 
 %changelog
+* Sun Aug 30 2026 Nichokas <nichokas@users.noreply.github.com> - 0.30.0-2
+- Rebuild: bump the shared Release counter so the PPA re-upload lands as
+  0.30.0~ppa2 after the dh_dwz/dh_shlibdeps build fix.
+
 * Sat Aug 29 2026 Nichokas <nichokas@users.noreply.github.com> - 0.30.0-1
 - Sync with upstream release v0.30.0 (x64 sha256 3623162e9442c504c43fb6df144e7aeecf9b5eb831040c70827adc98b5b49597) (arm64 sha256 67cb0332c40f5e3140f9f709c4c26065df00b9df5c4e53f15ad14aef44fafc9d).
 
