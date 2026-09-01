@@ -9,30 +9,28 @@ name: Auto Update
   workflow_dispatch:
     inputs:
       version:
-        description: "Grok Bot version to build (e.g. 0.19.0) — bypasses candidate probing"
+        description: "Grok Bot version to repack (e.g. 0.30.0) — must match api2's current stable"
         required: false
         default: ""
         type: string
   pull_request:
-    # Smoke-build gate: a change to the porting or detection logic must prove
-    # itself against the real installer before merge. Path-filtered so
-    # docs/VERSION/README changes don't trigger a ~250 MB download + native
-    # rebuild. The release job is separately gated against pull_request below,
-    # so a PR can never publish. update-aur.sh is intentionally excluded here:
-    # it only runs inside the release job, so a PR smoke-build cannot exercise
-    # it — listing it would give false confidence that the AUR bump path was
-    # tested. aur/** is intentionally included so AUR-only PRs still trigger
-    # aur-lint; the build job's need_build gate skips the heavy download for
-    # those PRs (see build.steps[0]).
+    # Smoke-build gate: a change to the repack or detection logic must
+    # prove itself against the real .deb before merge. Path-filtered so
+    # docs/VERSION/README changes don't trigger a ~250 MB download. The
+    # release job is separately gated against pull_request below, so a PR
+    # can never publish. update-aur.sh is intentionally excluded here:
+    # it only runs inside the release job, so a PR smoke-build cannot
+    # exercise it — listing it would give false confidence that the AUR
+    # bump path was tested. aur/** is intentionally included so AUR-only
+    # PRs still trigger aur-lint; the build job's need_build gate skips
+    # the heavy download for those PRs (see build.steps[0]).
     paths:
-      - "scripts/port.sh"
+      - "scripts/repack-deb.sh"
       - "scripts/detect-version.sh"
       - "scripts/update-spec.sh"
-      - "scripts/build-deb.sh"
       - "grokbot-linux-port.spec"
       - "aur/**"
       - ".github/workflows/auto-update.yml"
-      - ".github/workflows/ppa-publish.yml"
 
 # Least-privilege default; release job elevates contents to write via
 # permissions block.  Top-level permissions are the fallback for any job
@@ -46,14 +44,13 @@ concurrency:
 
 jobs:
   # -----------------------------------------------------------------------
-  # detect-version — version-anchored HEAD-probing discovery
+  # detect-version — read the current version from api2's canonical
+  # download manifest
   #
-  # Reads the current VERSION file as base, generates the candidate set
-  # covering non-linear jumps (patch sweep, minor sweep, next-patch,
-  # major sweep), HEAD-probes each win32 artifact URL, selects the highest
-  # semver candidate returning 200, and decides whether a build is warranted.
-  # When workflow_dispatch supplies inputs.version, that version is verified
-  # directly and treated as authoritative irrespective of the candidate set.
+  # GETs the manifest for both arches (app name "sand"), asserts they
+  # agree on version+commit, and compares against the VERSION file. The
+  # old semver HEAD-probe sweep is gone: upstream now publishes the
+  # version in JSON, so detection is exact, not inferred.
   # -----------------------------------------------------------------------
   detect-version:
     runs-on: namespace-profile-grokbot-lite
@@ -85,38 +82,23 @@ jobs:
           echo "detect-version outputs: version=$(grep '^version=' "$GITHUB_OUTPUT" | cut -d= -f2) is_new=$(grep '^is_new=' "$GITHUB_OUTPUT" | cut -d= -f2)"
 
   # -----------------------------------------------------------------------
-  # build — produce Linux artefacts for the detected version
+  # build — repack the official .deb(s) into release tarballs
   #
-  # Runs port.sh <version> which downloads the win32 NSIS installer, extracts
-  # it wine-less (7z x; the app-64.7z payload is located recursively — current
-  # installers nest it under $PLUGINSDIR/), fuses the payload with Electron
-  # 42.1.0 linux-x64, rebuilds the six native modules via @electron/rebuild,
-  # fixes chrome-sandbox permissions, and emits tar.gz (always) and
-  # AppImage (best-effort via AppDir + appimagetool). One runner per arch —
-  # the rebuilds are native, so arm64 needs an arm64 runner.
+  # Runs repack-deb.sh, which resolves the current .deb per arch through
+  # api2's manifest, downloads both, and reassembles each /opt payload as
+  # a deterministic tar.gz. Repacking copies bytes — nothing is executed
+  # or linked — so both arches build on one x64 runner; the arm64 runner
+  # this matrix used to need existed only for the native-module rebuilds
+  # of the win32 porting pipeline.
   # -----------------------------------------------------------------------
   build:
     needs: detect-version
-    # Two entry points: (a) production — a newer version was detected, build
-    # it; (a') explicit rebuild — workflow_dispatch with the current version
-    # forces a rebuild + AUR resync (port.sh fixes must reach AUR users);
-    # (b) pull_request — smoke-build the pinned VERSION to prove the porting
-    # path still works. On (b) with no new version, detect-version returns
-    # the base VERSION and this builds that.
+    # (a) production — a newer version was detected; (a') explicit rebuild
+    # — workflow_dispatch with the current version forces a rebuild + AUR
+    # resync (repack fixes must reach AUR users); (b) pull_request —
+    # smoke-build the pinned VERSION to prove the repack still works.
     if: needs.detect-version.outputs.is_new == 'true' || needs.detect-version.outputs.rebuild == 'true' || github.event_name == 'pull_request'
-    strategy:
-      fail-fast: false
-      matrix:
-        # port.sh builds natively (native modules are compiled against the
-        # target Electron ABI, no cross toolchain), so each arch needs a
-        # runner of that arch — hence the explicit arch->runner pairing
-        # instead of a bare `arch:` list.
-        include:
-          - arch: x64
-            runner: namespace-profile-grokbot
-          - arch: arm64
-            runner: namespace-profile-grokbot-arm
-    runs-on: ${{ matrix.runner }}
+    runs-on: namespace-profile-grokbot
     permissions:
       contents: read
     steps:
@@ -134,82 +116,44 @@ jobs:
           # On PR, skip heavy build when only aur/ or docs changed
           base="origin/${{ github.base_ref }}"
           git fetch --depth=1 origin "${{ github.base_ref }}" 2>/dev/null || true
-          changed="$(git diff --name-only "$base"...HEAD 2>/dev/null || git diff --name-only HEAD~1 2>/dev/null || echo 'scripts/port.sh')"
+          changed="$(git diff --name-only "$base"...HEAD 2>/dev/null || git diff --name-only HEAD~1 2>/dev/null || echo 'scripts/repack-deb.sh')"
           echo "Changed files:"
           echo "$changed"
-          if echo "$changed" | grep -qvE '^(aur/|README\.md$|VERSION$)' && echo "$changed" | grep -qE '^(scripts/(port\.sh|detect-version\.sh|build-deb\.sh)|\.github/workflows/(auto-update|ppa-publish)\.yml)'; then
-            echo "needed=true" >> "$GITHUB_OUTPUT"
-          elif echo "$changed" | grep -qE '^(scripts/(port\.sh|detect-version\.sh|build-deb\.sh)|\.github/workflows/(auto-update|ppa-publish)\.yml)'; then
+          if echo "$changed" | grep -qE '^(scripts/(repack-deb\.sh|detect-version\.sh|update-spec\.sh)|grokbot-linux-port\.spec|\.github/workflows/auto-update\.yml)'; then
             echo "needed=true" >> "$GITHUB_OUTPUT"
           else
-            echo "AUR/docs-only PR — skipping heavy Linux port build (aur-lint still runs)"
+            echo "AUR/docs-only PR — skipping heavy repack (aur-lint still runs)"
             echo "needed=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Set up Node.js 22
-        if: steps.need_build.outputs.needed == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Set up Bun
-        if: steps.need_build.outputs.needed == 'true'
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
       # Namespace cache volume instead of actions/cache: instant NVMe hits,
-      # no upload/download leg, and no key-busting — entries survive port.sh
-      # edits and Electron bumps instead of being invalidated by hashFiles.
-      # Holds both the Electron linux zip and the win32 installers port.sh
-      # fetches (see GROKBOT_CACHE_DIR in the build step), so PR smoke-builds
-      # stop re-downloading ~250 MB per run.
-      - name: Restore cached downloads (Electron zip + win32 installers)
+      # no upload/download leg, and no key-busting — entries survive script
+      # edits instead of being invalidated by hashFiles. Holds the ~190 MB
+      # of upstream .debs repack-deb.sh fetches (see GROKBOT_CACHE_DIR in
+      # the build step), so PR smoke-builds stop re-downloading per run.
+      - name: Restore cached downloads (upstream .debs)
         if: steps.need_build.outputs.needed == 'true'
         uses: namespacelabs/nscloud-cache-action@v1
         with:
-          path: ${{ github.workspace }}/.cache/downloads
+          path: ${{ github.workspace }}/.cache/debs
 
       - name: Install system dependencies
         if: steps.need_build.outputs.needed == 'true'
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          # p7zip-full provides 7z for wine-less NSIS extraction; unzip for
-          # Electron archive; build-essential + python3 for node-gyp native
-          # rebuilds (better-sqlite3, tree-sitter, etc.).
-          sudo apt-get install -y --no-install-recommends \
-            p7zip-full unzip squashfs-tools build-essential python3
+          # binutils provides ar; xz for the deb's compressed data member.
+          sudo apt-get install -y --no-install-recommends binutils xz-utils
 
-      - name: Install Node dependencies (rebuild tooling)
-        if: steps.need_build.outputs.needed == 'true'
-        run: |
-          set -euo pipefail
-          # No lockfile needed — tools are invoked via bunx/npx at build time.
-          # Pre-warm the cache for faster port.sh execution.
-          if command -v bun >/dev/null 2>&1; then
-            bunx --yes @electron/asar --help >/dev/null 2>&1 || true
-            bunx --yes @electron/rebuild --help >/dev/null 2>&1 || true
-          else
-            npx --yes @electron/asar --help >/dev/null 2>&1 || true
-            npx --yes @electron/rebuild --help >/dev/null 2>&1 || true
-          fi
-
-      - name: Build Linux port for ${{ needs.detect-version.outputs.version }}
+      - name: Repack Grok Bot ${{ needs.detect-version.outputs.version }}
         if: steps.need_build.outputs.needed == 'true'
         env:
           GROK_VERSION: ${{ needs.detect-version.outputs.version }}
-          ELECTRON_VERSION: "42.1.0"
-          # Same path nscloud-cache-action persists above; port.sh stores the
-          # win32 installer + Electron zip here and reuses them on later runs.
-          GROKBOT_CACHE_DIR: ${{ github.workspace }}/.cache/downloads
+          GROKBOT_CACHE_DIR: ${{ github.workspace }}/.cache/debs
         run: |
           set -euo pipefail
-          echo "Building Grok Bot ${GROK_VERSION} for linux-${{ matrix.arch }} (Electron ${ELECTRON_VERSION})"
-          # --arch is passed explicitly rather than left to port.sh's uname
-          # detection: a mislabelled runner then fails loudly instead of
-          # silently publishing a second x64 tarball under the arm64 name.
-          bash scripts/port.sh --arch "${{ matrix.arch }}" "${GROK_VERSION}"
+          echo "Repacking Grok Bot ${GROK_VERSION} (official .deb -> release tarballs)"
+          bash scripts/repack-deb.sh --version "${GROK_VERSION}"
           echo "Build artefacts:"
           ls -lh dist/ || true
 
@@ -217,20 +161,20 @@ jobs:
         if: steps.need_build.outputs.needed == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: grokbot-linux-${{ needs.detect-version.outputs.version }}-${{ matrix.arch }}
+          name: grokbot-linux-${{ needs.detect-version.outputs.version }}
           path: |
             dist/*.tar.gz
-            dist/*.AppImage
           if-no-files-found: error
           retention-days: 7
 
   # -----------------------------------------------------------------------
-  # aur-lint — validate AUR PKGBUILDs on PRs touching aur/
+  # aur-lint — validate the AUR PKGBUILD on PRs touching aur/
   #
   # Lightweight gate so an AUR-only PR with a broken PKGBUILD does not get
-  # a green check from the unrelated Linux smoke build. Uses namcap when
-  # available, else falls back to `bash -n` + `makepkg --printsrcinfo` checks.
-  # Only runs on pull_request to avoid duplicate work on scheduled/dispatch.
+  # a green check from the unrelated repack smoke build. Uses namcap when
+  # available, else falls back to `bash -n` + `makepkg --printsrcinfo`
+  # checks. Only runs on pull_request to avoid duplicate work on
+  # scheduled/dispatch.
   # -----------------------------------------------------------------------
   aur-lint:
     if: github.event_name == 'pull_request'
@@ -242,7 +186,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Lint AUR PKGBUILDs
+      - name: Lint AUR PKGBUILD
         run: |
           set -euo pipefail
           # makepkg refuses to run as root; archlinux:base-devel defaults to root.
@@ -253,10 +197,11 @@ jobs:
           chown -R builder:builder aur 2>/dev/null || true
           run_as_builder() { runuser -u builder -- bash -c "$1"; }
           failed=0
-          for dir in aur/grokbot-linux-port aur/grokbot-linux-port-bin; do
+          for dir in aur/grokbot-linux-port-bin; do
             echo "==> Checking ${dir}/PKGBUILD"
             if [[ ! -f "${dir}/PKGBUILD" ]]; then
-              echo "  skip (no PKGBUILD)"
+              echo "  FAIL: ${dir}/PKGBUILD missing" >&2
+              failed=1
               continue
             fi
             bash -n "${dir}/PKGBUILD" || { echo "  FAIL: bash -n"; failed=1; continue; }
@@ -271,7 +216,7 @@ jobs:
               namcap "${dir}/PKGBUILD" || echo "  (namcap warnings — non-fatal)"
             fi
           done
-          exit "${failed}" 
+          exit "${failed}"
 
   # -----------------------------------------------------------------------
   # spec-lint — validate the RPM spec on PRs touching it
@@ -324,12 +269,12 @@ jobs:
           mkdir -p "${work}/SOURCES"
           for arch in x64 arm64; do
             dir="${work}/Grok_Bot_${ver}_linux_${arch}"
-            mkdir -p "${dir}/resources/app.asar.unpacked/dist"
-            printf 'grok-bot stub\n' > "${dir}/grok-bot"
-            printf 'chrome-sandbox stub\n' > "${dir}/chrome-sandbox"
-            printf 'icon stub\n' > "${dir}/grok-bot.png"
-            printf 'asar stub\n' > "${dir}/resources/app.asar"
-            chmod 700 "${dir}/resources/app.asar.unpacked"
+            mkdir -p "${dir}/payload/resources/app.asar.unpacked/dist" "${dir}/hicolor/256x256/apps"
+            printf 'grok-bot stub\n' > "${dir}/payload/grok-bot"
+            printf 'chrome-sandbox stub\n' > "${dir}/payload/chrome-sandbox"
+            printf 'asar stub\n' > "${dir}/payload/resources/app.asar"
+            printf 'icon stub\n' > "${dir}/hicolor/256x256/apps/grok-bot.png"
+            chmod 700 "${dir}/payload/resources/app.asar.unpacked"
             tar -czf "${work}/SOURCES/Grok_Bot_${ver}_linux_${arch}.tar.gz" \
               -C "${work}" "Grok_Bot_${ver}_linux_${arch}"
           done
@@ -412,68 +357,62 @@ jobs:
           # Hash the exact bytes this job will upload. update-aur.sh must not
           # re-hash the published URL: GitHub's asset CDN races propagation of
           # freshly uploaded assets, and a re-upload leaves the old sum behind.
-          # Each arch is optional — when the build matrix didn't publish a
-          # tarball for an arch, the corresponding output stays empty and the
-          # AUR/spec steps below skip that arch instead of rejecting an empty
-          # --bin-sum-* arg.
+          # Both arches come from the single build job; a missing tarball is
+          # a build failure, not an expected matrix outcome, so fail hard.
           for arch in x64 arm64; do
             tarball="dist/Grok_Bot_${VER}_linux_${arch}.tar.gz"
-            if [[ -f "${tarball}" ]]; then
-              sum="$(sha256sum "${tarball}" | awk '{print $1}')"
-              echo "tarball_sum_${arch}=${sum}" >> "${GITHUB_OUTPUT}"
-              echo "sha256(${tarball}) = ${sum}"
-            else
-              echo "tarball_sum_${arch}=" >> "${GITHUB_OUTPUT}"
-              echo "::notice::no ${tarball} — skipping ${arch} hash (build matrix may not have published this arch)"
+            if [[ ! -f "${tarball}" ]]; then
+              echo "::error::missing ${tarball} — the repack job must publish both arches" >&2
+              exit 1
             fi
+            sum="$(sha256sum "${tarball}" | awk '{print $1}')"
+            echo "tarball_sum_${arch}=${sum}" >> "${GITHUB_OUTPUT}"
+            echo "sha256(${tarball}) = ${sum}"
           done
-
-      - name: Fix chrome-sandbox permissions in tarball (post-hoc note)
-        run: |
-          echo "Note: chrome-sandbox inside the tarball is set to 4755 during build when running as root."
-          echo "Consumers extracting as non-root must run: sudo chown root:root chrome-sandbox && sudo chmod 4755 chrome-sandbox"
 
       - name: Create GitHub Release
         id: ghrelease
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.detect-version.outputs.version }}
-          name: Grok Bot ${{ needs.detect-version.outputs.version }} (Linux port)
-          # Always overwrite: a workflow re-run rebuilds non-deterministic
-          # tarball bytes; skipping existing assets would publish the -bin
-          # checksum of bytes the release no longer serves.
+          name: Grok Bot ${{ needs.detect-version.outputs.version }} (Linux repack)
+          # Always overwrite: a workflow re-run re-uploads the same
+          # deterministic tarball bytes; skipping existing assets would
+          # publish the -bin checksum of bytes the release no longer serves.
           overwrite_files: true
           body: |
-            Linux port of Grok Bot `${{ needs.detect-version.outputs.version }}`.
+            Grok Bot `${{ needs.detect-version.outputs.version }}` for Linux.
 
-            Built from the official Windows distribution via wine-less extraction (`7z x`, recursive `app-64.7z` locate) fused with Electron 42.1.0 (linux-x64 / linux-arm64), with native modules rebuilt via `@electron/rebuild`.
+            Repacked verbatim from xAI's official Linux .deb (both x64 and arm64), resolved through api2's canonical download manifest. The payload ships unchanged — same Electron runtime and native modules xAI builds.
 
             **Install**
 
             ```bash
-            # replace x64 with arm64 on aarch64
-            tar -xzf Grok_Bot_${{ needs.detect-version.outputs.version }}_linux_x64.tar.gz
-            cd Grok_Bot_${{ needs.detect-version.outputs.version }}_linux_x64
-            # chrome-sandbox requires setuid when not using --no-sandbox
-            sudo chown root:root chrome-sandbox && sudo chmod 4755 chrome-sandbox
-            ./grok-bot
+            # Arch (AUR)
+            yay -S grokbot-linux-port-bin
+            # Fedora (COPR)
+            sudo dnf copr enable nichokas/grokbot-linux-port && sudo dnf install grokbot-linux-port
             ```
 
-            **Artefacts**
+            **Tarball (any distro):**
 
-            - `Grok_Bot_<version>_linux_x64.tar.gz` / `_linux_arm64.tar.gz` — portable archives
-            - `Grok_Bot_<version>_x86_64.AppImage` / `_aarch64.AppImage` — AppImage (best-effort, requires squashfs-tools + appimagetool)
+            ```bash
+            tar -xzf Grok_Bot_${{ needs.detect-version.outputs.version }}_linux_x64.tar.gz   # arm64 on aarch64
+            cd Grok_Bot_${{ needs.detect-version.outputs.version }}_linux_x64
+            # chrome-sandbox requires setuid when not using --no-sandbox
+            sudo chown root:root payload/chrome-sandbox && sudo chmod 4755 payload/chrome-sandbox
+            ./payload/grok-bot
+            ```
 
-            *Automated build — triggered by daily HEAD-probing of `https://downloads.cursor.com/grokbot/stable/win32-x64/<version>/Grok_Bot_<version>_Setup.exe`.*
+            *Automated repack — triggered by daily polling of `https://api2.cursor.sh/updates/api/download/stable/linux-<arch>/sand`.*
           files: |
             dist/*.tar.gz
-            dist/*.AppImage
           generate_release_notes: false
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Bump AUR PKGBUILDs
+      - name: Bump AUR PKGBUILD
         id: aur-bump
         env:
           VER: ${{ needs.detect-version.outputs.version }}
@@ -482,16 +421,10 @@ jobs:
           REBUILD: ${{ needs.detect-version.outputs.rebuild }}
         run: |
           set -euo pipefail
-          [[ -d aur/grokbot-linux-port && -d aur/grokbot-linux-port-bin ]] || { echo "aur/ tree missing"; echo "changed=false" >> "${GITHUB_OUTPUT}"; exit 0; }
+          [[ -f aur/grokbot-linux-port-bin/PKGBUILD ]] || { echo "aur/ tree missing"; echo "changed=false" >> "${GITHUB_OUTPUT}"; exit 0; }
 
-          # Build the --bin-sum-* args array conditionally: update-aur.sh
-          # rejects an empty sum, and a build matrix that didn't publish an
-          # arch (e.g. arm64 not yet enabled) would otherwise set the env
-          # to "" and break the bump. Only forward sums that are non-empty.
-          aur_sum_args=()
-          [[ -n "${TARBALL_SUM_X64}" ]] && aur_sum_args+=(--bin-sum-x64 "${TARBALL_SUM_X64}")
-          [[ -n "${TARBALL_SUM_ARM64}" ]] && aur_sum_args+=(--bin-sum-arm64 "${TARBALL_SUM_ARM64}")
-
+          # Both sums are always present (the release step fails hard on a
+          # missing arch), so pass them unconditionally.
           if [[ "${REBUILD}" == "true" ]]; then
             # Rebuild resync: the tag and its source archive predate this
             # run, so only the -bin package's freshly rebuilt bytes can be
@@ -500,21 +433,19 @@ jobs:
             # bump pkgrel; AUR helpers ignore same-pkgrel updates. VERSION
             # is left untouched — nothing version-related changed.
             echo "Rebuild of ${VER} — resyncing -bin checksum + pkgrel"
-            bash scripts/update-aur.sh --bin-only "${aur_sum_args[@]}" "${VER}"
+            bash scripts/update-aur.sh --bin-only --bin-sum-x64 "${TARBALL_SUM_X64}" --bin-sum-arm64 "${TARBALL_SUM_ARM64}" "${VER}"
             echo "changed=true" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
-          echo "Bumping AUR packages to ${VER} (x64=${TARBALL_SUM_X64:-<none>} arm64=${TARBALL_SUM_ARM64:-<none>})"
-          bash scripts/update-aur.sh "${aur_sum_args[@]}" "${VER}"
+          echo "Bumping AUR package to ${VER}"
+          bash scripts/update-aur.sh --bin-sum-x64 "${TARBALL_SUM_X64}" --bin-sum-arm64 "${TARBALL_SUM_ARM64}" "${VER}"
           if git diff --quiet -- aur/; then
-            echo "AUR PKGBUILDs already carried ${VER} — nothing to commit"
+            echo "AUR PKGBUILD already carried ${VER} — nothing to commit"
             echo "changed=false" >> "${GITHUB_OUTPUT}"
           else
             echo "changed=true" >> "${GITHUB_OUTPUT}"
-            for pkg in grokbot-linux-port grokbot-linux-port-bin; do
-              git add "aur/${pkg}/PKGBUILD" "aur/${pkg}/.SRCINFO"
-            done
+            git add "aur/grokbot-linux-port-bin/PKGBUILD" "aur/grokbot-linux-port-bin/.SRCINFO"
           fi
 
       - name: Bump RPM spec (COPR)
@@ -528,21 +459,13 @@ jobs:
           set -euo pipefail
           [[ -f grokbot-linux-port.spec ]] || { echo "grokbot-linux-port.spec missing"; echo "changed=false" >> "${GITHUB_OUTPUT}"; exit 0; }
 
-          # Same conditional-passing rule as the AUR step: update-spec.sh
-          # only gets --sum-x64 / --sum-arm64 for arches that actually
-          # published a tarball this run. The legacy --sum form keeps the
-          # existing x64 behaviour so a single-arch release keeps working.
-          spec_args=()
-          [[ -n "${TARBALL_SUM_X64}" ]] && spec_args+=(--sum-x64 "${TARBALL_SUM_X64}")
-          [[ -n "${TARBALL_SUM_ARM64}" ]] && spec_args+=(--sum-arm64 "${TARBALL_SUM_ARM64}")
-
           if [[ "${REBUILD}" == "true" ]]; then
             # Same resync semantics as the AUR -bin package: freshly rebuilt
             # release bytes need the new checksum plus a Release bump so
             # installed clients pick the update up.
-            bash scripts/update-spec.sh --bump-release "${spec_args[@]}" "${VER}"
+            bash scripts/update-spec.sh --bump-release --sum-x64 "${TARBALL_SUM_X64}" --sum-arm64 "${TARBALL_SUM_ARM64}" "${VER}"
           else
-            bash scripts/update-spec.sh "${spec_args[@]}" "${VER}"
+            bash scripts/update-spec.sh --sum-x64 "${TARBALL_SUM_X64}" --sum-arm64 "${TARBALL_SUM_ARM64}" "${VER}"
           fi
           if git diff --quiet -- grokbot-linux-port.spec; then
             echo "spec already carried ${VER} — nothing to commit"
@@ -614,107 +537,6 @@ jobs:
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/dispatches" \
             -d '{"event_type":"copr-rebuild"}'
 
-      - name: Poke PPA rebuild
-        # Same rationale as COPR: GITHUB_TOKEN pushes suppress the push event
-        # that would otherwise reach ppa-publish.yml, so dispatch it explicitly.
-        # Only when on the default branch, for the same stale-main reason.
-        if: steps.spec-bump.outputs.changed == 'true' && github.ref_name == github.event.repository.default_branch
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          curl -fsS -o /dev/null -w "ppa-rebuild dispatch HTTP %{http_code}\n" -X POST \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/dispatches" \
-            -d '{"event_type":"ppa-rebuild"}'
-
-  # -----------------------------------------------------------------------
-  # deb-lint — validate Debian source package on PRs
-  #
-  # Mirrors aur-lint/spec-lint: build a stub source package with build-deb.sh
-  # and lint it. The stub tarball is tiny (few KB) and carries the minimal
-  # layout build-deb.sh expects (grok-bot + resources/app.asar + chrome-sandbox);
-  # icon extraction is best-effort so a missing app-icon is fine. lintian
-  # checks are non-fatal (|| warn) while bash -n / missing .changes are fatal.
-  # -----------------------------------------------------------------------
-  deb-lint:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Lint Debian source package (stub)
-        run: |
-          set -euo pipefail
-          bash -n scripts/build-deb.sh
-          sudo apt-get update -qq
-          # fakeroot + build-essential are for the binary smoke build below: the
-          # runner image ships gcc but not the build-essential metapackage that
-          # dpkg-checkbuilddeps demands.
-          sudo apt-get install -y --no-install-recommends debhelper devscripts lintian fakeroot build-essential
-          tmp="$(mktemp -d -t deb-lint-XXXXXX)"
-          trap 'rm -rf "${tmp}"' EXIT
-          # Stub tarball mirrors the real filename per arch; build-deb.sh's
-          # --arch gate refuses a mismatch, so both arches prove the mapping.
-          for arch in amd64 arm64; do
-            case "${arch}" in
-              amd64) kernel="linux_x64" ;;
-              arm64) kernel="linux_arm64" ;;
-            esac
-            mkdir -p "${tmp}/Grok_Bot_0.0.1_${kernel}/resources" "${tmp}/Grok_Bot_0.0.1_${kernel}/locales"
-            printf '#!/bin/sh\necho grok-bot stub\n' > "${tmp}/Grok_Bot_0.0.1_${kernel}/grok-bot"
-            chmod +x "${tmp}/Grok_Bot_0.0.1_${kernel}/grok-bot"
-            # chrome-sandbox is a real ELF carrying split DWARF: dh's ELF
-            # helpers only chew on actual binaries, so a touch'd file (or a
-            # shell script) let a dh_dwz abort reach Launchpad unnoticed.
-            printf 'int main(void){return 0;}\n' > "${tmp}/stub.c"
-            gcc -g -gsplit-dwarf -o "${tmp}/chrome-sandbox" "${tmp}/stub.c"
-            mv "${tmp}/chrome-sandbox" "${tmp}/Grok_Bot_0.0.1_${kernel}/chrome-sandbox"
-            echo "stub" > "${tmp}/Grok_Bot_0.0.1_${kernel}/resources/app.asar"
-            stub="/tmp/Grok_Bot_0.0.1_${kernel}.tar.gz"
-            tar -czf "${stub}" -C "${tmp}" "Grok_Bot_0.0.1_${kernel}"
-            sum="$(sha256sum "${stub}" | awk '{print $1}')"
-            echo "stub sha256 (${arch})=${sum}"
-            bash scripts/build-deb.sh --tarball "${stub}" --sha256 "${sum}" --arch "${arch}" --series noble --out-dir /tmp/deb-lint-out
-            echo "--- ${arch} .changes ---"
-            cat "/tmp/deb-lint-out/${arch}/noble/"*_source.changes
-            echo "--- ${arch} .dsc ---"
-            cat "/tmp/deb-lint-out/${arch}/noble/"*.dsc
-            # .changes must list the source tarball (revision-agnostic: ~ppa<N>
-            # mirrors the spec's Release counter, so don't pin it here). The
-            # +arch suffix keeps the two matrix uploads distinct in Launchpad.
-            grep -q "grokbot-linux-port_0.0.1~ppa[0-9]*~noble1+${arch}" "/tmp/deb-lint-out/${arch}/noble/"*_source.changes
-            grep -q "grokbot-linux-port_0.0.1~ppa[0-9]*~noble1+${arch}" "/tmp/deb-lint-out/${arch}/noble/"*.dsc
-            # --fail-on error: warnings don't fail the gate, errors do
-            lintian --fail-on error "/tmp/deb-lint-out/${arch}/noble/"*_source.changes
-            # Only the source package ships to Launchpad, but the builder then
-            # runs `dh binary` — that is where dh_dwz/dh_strip/dh_makeshlibs/
-            # dh_shlibdeps run and where every 0.30.0~ppa1 build died. Prove
-            # the binary sequence completes here (amd64 only; the arm64 leg
-            # would need a foreign-arch build for no extra coverage).
-            if [[ "${arch}" == "amd64" ]]; then
-              bin="$(mktemp -d -t deb-bin-XXXXXX)"
-              dpkg-source -x "/tmp/deb-lint-out/amd64/noble/"*.dsc "${bin}/pkg" >/dev/null
-              ( cd "${bin}/pkg" && DEB_BUILD_OPTIONS=noautodbgsym dpkg-buildpackage -b -us -uc -rfakeroot )
-              deb="$(ls "${bin}"/*.deb)"
-              # A shlibs file would advertise the bundle's private libs as
-              # provided by this package; chrome-sandbox must stay setuid.
-              if dpkg-deb --ctrl-tarfile "${deb}" | tar t | grep -qx './shlibs'; then
-                echo "::error::dh_makeshlibs published a shlibs file for the vendored /opt bundle" >&2
-                exit 1
-              fi
-              dpkg-deb -c "${deb}" | grep -qE '^-rwsr-xr-x .*/chrome-sandbox$' || {
-                echo "::error::chrome-sandbox lost its setuid bit in the binary package" >&2
-                exit 1
-              }
-              rm -rf "${bin}"
-            fi
-          done
-
   # -----------------------------------------------------------------------
   # aur-publish — push PKGBUILD + .SRCINFO to aur.archlinux.org
   #
@@ -760,20 +582,19 @@ jobs:
           VER: ${{ needs.release.outputs.version }}
         run: |
           set -euo pipefail
-          for pkg in grokbot-linux-port grokbot-linux-port-bin; do
-            echo "::group::Publish ${pkg}"
-            tmp="$(mktemp -d)"
-            git clone "ssh://aur@aur.archlinux.org/${pkg}.git" "${tmp}/${pkg}"
-            git -C "${tmp}/${pkg}" config user.name "github-actions[bot]"
-            git -C "${tmp}/${pkg}" config user.email "github-actions[bot]@users.noreply.github.com"
-            cp "aur/${pkg}/PKGBUILD" "aur/${pkg}/.SRCINFO" "${tmp}/${pkg}/"
-            git -C "${tmp}/${pkg}" add PKGBUILD .SRCINFO
-            if git -C "${tmp}/${pkg}" diff --cached --quiet; then
-              echo "${pkg} already up to date on AUR"
-            else
-              git -C "${tmp}/${pkg}" commit -m "upgpkg: ${VER}"
-              git -C "${tmp}/${pkg}" push origin master
-            fi
-            rm -rf "${tmp}"
-            echo "::endgroup::"
-          done
+          pkg=grokbot-linux-port-bin
+          echo "::group::Publish ${pkg}"
+          tmp="$(mktemp -d)"
+          git clone "ssh://aur@aur.archlinux.org/${pkg}.git" "${tmp}/${pkg}"
+          git -C "${tmp}/${pkg}" config user.name "github-actions[bot]"
+          git -C "${tmp}/${pkg}" config user.email "github-actions[bot]@users.noreply.github.com"
+          cp "aur/${pkg}/PKGBUILD" "aur/${pkg}/.SRCINFO" "${tmp}/${pkg}/"
+          git -C "${tmp}/${pkg}" add PKGBUILD .SRCINFO
+          if git -C "${tmp}/${pkg}" diff --cached --quiet; then
+            echo "${pkg} already up to date on AUR"
+          else
+            git -C "${tmp}/${pkg}" commit -m "upgpkg: ${VER}"
+            git -C "${tmp}/${pkg}" push origin master
+          fi
+          rm -rf "${tmp}"
+          echo "::endgroup::"

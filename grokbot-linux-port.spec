@@ -1,18 +1,19 @@
-# grokbot-linux-port.spec — Fedora/COPR packaging (prebuilt variant)
+# grokbot-linux-port.spec — Fedora/COPR packaging (repack variant)
 #
 # Mirrors aur/grokbot-linux-port-bin: the payload is the prebuilt Linux
-# tarball published on GitHub Releases by .github/workflows/auto-update.yml.
-# scripts/update-spec.sh keeps Version/Release and the sha256 in sync with
-# each release (and bumps Release on rebuild resyncs), the same way
-# scripts/update-aur.sh maintains the AUR PKGBUILDs.
+# tarball published on GitHub Releases by .github/workflows/auto-update.yml,
+# itself repacked verbatim from xAI's official Linux .deb by
+# scripts/repack-deb.sh. scripts/update-spec.sh keeps Version/Release and
+# the sha256 in sync with each release (and bumps Release on rebuild
+# resyncs), the same way scripts/update-aur.sh maintains the AUR PKGBUILD.
 #
 # COPR builds this via the "rpkg" source method: it clones the repo and runs
 # `rpkg srpm`, which expects this spec at the repository root.
 
 Name:           grokbot-linux-port
-Version:        0.35.0
-Release:        1%{?dist}
-Summary:        Grok Bot desktop — wine-less Linux port (prebuilt tarball)
+Version:        0.30.0
+Release:        3%{?dist}
+Summary:        Grok Bot desktop agent (repacked from the official Linux .deb)
 
 # Upstream EULA lives inside resources/app.asar; see the installed LICENSE.
 License:        Proprietary
@@ -41,9 +42,9 @@ Source1:        %{url}/releases/download/v%{version}/Grok_Bot_%{version}_linux_a
 BuildRequires:  coreutils
 BuildRequires:  findutils
 BuildRequires:  tar
-BuildRequires:  python3
 
-# Runtime libraries for Electron 42 (names translated from the AUR depends).
+# Runtime libraries for Electron 42 (names translated from the official
+# .deb's Depends list).
 Requires:       alsa-lib
 Requires:       at-spi2-core
 Requires:       cairo
@@ -51,6 +52,7 @@ Requires:       expat
 Requires:       gtk3
 Requires:       hicolor-icon-theme
 Requires:       libdrm
+Requires:       libsecret
 Requires:       libXcomposite
 Requires:       libXdamage
 Requires:       libXfixes
@@ -68,10 +70,10 @@ Provides:       grok-bot = %{version}-%{release}
 Provides:       grokbot = %{version}-%{release}
 
 %description
-Grok Bot desktop agent for Linux without Wine: the official Windows (NSIS)
-payload fused with Electron 42.1.0 and native modules rebuilt for Linux.
-This package installs the prebuilt tarball published on GitHub Releases by
-the grokbot-linux-port CI.
+Grok Bot desktop agent for Linux, repacked verbatim from xAI's official
+Linux .deb. The payload installs under /opt with its bundled Electron
+runtime; this package adds the /usr integration (desktop entry, hicolor
+icons, /usr/bin symlinks) that the .deb's own layout provides.
 
 %prep
 # Refuse arches that carry no tarball: packaging the x64 payload under an
@@ -84,22 +86,19 @@ exit 1
 # tarball. %ifarch tests the chroot's real build arch; the setup macro's
 # per-source unpack flags proved unreliable across rpm versions (rpm 6
 # unpacks Source0 alongside -b 1), so the extraction is spelled out.
+# The sha256 line re-verifies the bytes so a re-uploaded release asset
+# fails the build instead of shipping changed bytes under the same NVR.
 %ifarch aarch64
 rm -rf %{payload_dir}
 tar -xf %{SOURCE1}
-echo "a236187bb0a40315eae47da5a5b8ff48e2c1c8f33d6c89cedad6535456a2e561  %{_sourcedir}/Grok_Bot_0.35.0_linux_arm64.tar.gz" | sha256sum -c -
+echo "05d2439bf8685aff0f460c9fd649fc2e2a3cfb40f4fba9ce513d058f32198324  %{_sourcedir}/Grok_Bot_0.30.0_linux_arm64.tar.gz" | sha256sum -c -
 cd %{payload_dir}
 %else
 rm -rf %{payload_dir}
 tar -xf %{SOURCE0}
-echo "bb32e388b53467f1d0d7c1f5ab0bcedf7afb893f07af85f1576e768831e430ff  %{_sourcedir}/Grok_Bot_0.35.0_linux_x64.tar.gz" | sha256sum -c -
+echo "24641af283ef68a682f42a06c63642292947b468e3bc51271ae1295dcf56e44d  %{_sourcedir}/Grok_Bot_0.30.0_linux_x64.tar.gz" | sha256sum -c -
 cd %{payload_dir}
 %endif
-
-# The tarball keeps NSIS-derived restrictive modes (drwx------ on
-# app.asar.unpacked); normalise so the installed tree is world-readable,
-# matching the AUR package.
-chmod -R u+rwX,go+rX,go-w .
 
 %install
 # Each scriptlet starts fresh in the builddir, so %prep's cd does not carry
@@ -112,15 +111,9 @@ cd %{payload_dir}
 install -dm755 %{buildroot}/opt/%{name} \
                %{buildroot}%{_bindir} \
                %{buildroot}%{_datadir}/applications \
-               %{buildroot}%{_datadir}/icons/hicolor/256x256/apps \
                %{buildroot}%{_licensedir}/%{name}
 
-cp -a . %{buildroot}/opt/%{name}/
-
-# Some tarballs keep the electron binary named 'electron'; normalise.
-if [ ! -x %{buildroot}/opt/%{name}/grok-bot ] && [ -x %{buildroot}/opt/%{name}/electron ]; then
-  mv %{buildroot}/opt/%{name}/electron %{buildroot}/opt/%{name}/grok-bot
-fi
+cp -a payload/. %{buildroot}/opt/%{name}/
 chmod +x %{buildroot}/opt/%{name}/grok-bot
 
 ln -s /opt/%{name}/grok-bot %{buildroot}%{_bindir}/grok-bot
@@ -130,87 +123,44 @@ cat > %{buildroot}%{_datadir}/applications/grok-bot.desktop <<'DESKTOP'
 [Desktop Entry]
 Name=Grok Bot
 GenericName=Grok Bot
-Comment=Grok Bot desktop agent (Linux port)
+Comment=Grok Bot desktop agent
 Exec=/opt/grokbot-linux-port/grok-bot %U
 Icon=grok-bot
 Type=Application
 Categories=Utility;Development;
 StartupWMClass=grok-bot
-MimeType=x-scheme-handler/grokbot;
+MimeType=x-scheme-handler/grokbot;x-scheme-handler/sand;
 Terminal=false
 DESKTOP
 
-# The desktop entry always ships; the icon joins the same filelist only when
-# a PNG is found. Current tarballs keep it inside packed app.asar, so a
-# filesystem hunt fails — extract from asar in that case. A -f filelist must
-# contain at least one real entry, hence anchoring it on the desktop file.
+# The desktop entry anchors the -f filelist (a filelist must carry at least
+# one entry); the icon lines join it below.
 echo "%{_datadir}/applications/grok-bot.desktop" > "${builddir}/extra.filelist"
-icon=""
-for cand in \
-  grok-bot.png \
-  resources/app.asar.unpacked/dist/renderer/assets/app-icon-*.png \
-  resources/app.asar.unpacked/*.png
-do
-  [ -f "${cand}" ] && { icon="${cand}"; break; }
+
+# The tarball ships the full hicolor tree (16..512) repacked from the .deb's
+# /usr/share/icons, so the icon hunt/asar-extraction this spec used to carry
+# is gone: copy the tree wholesale and list every size it contains. The
+# tarball's hicolor/ IS the icons/hicolor subtree, hence the icons/ prefix
+# added on install.
+for png in hicolor/*/apps/grok-bot.png; do
+  install -Dm644 "${png}" "%{buildroot}%{_datadir}/icons/${png}"
+  echo "%{_datadir}/icons/${png}" >> "${builddir}/extra.filelist"
 done
-if [ -z "${icon}" ]; then
-  icon="$(find . -name 'app-icon*.png' -print -quit || true)"
-fi
-if [ -z "${icon}" ] && [ -f resources/app.asar ]; then
-  python3 - resources/app.asar grok-bot-from-asar.png <<'PY' && icon=grok-bot-from-asar.png
-import json, pathlib, struct, sys
-
-def walk(node, prefix=""):
-    for name, meta in node.get("files", {}).items():
-        path = f"{prefix}/{name}" if prefix else name
-        if "files" in meta:
-            yield from walk(meta, path)
-        else:
-            yield path, meta
-
-# Best-effort extraction: the %files icon entry is conditional anyway, so
-# keep failures as one-line errors instead of tracebacks.
-try:
-    asar, dest = sys.argv[1], sys.argv[2]
-    with open(asar, "rb") as fh:
-        if struct.unpack("<I", fh.read(4))[0] != 4:
-            raise SystemExit("bad asar pickle")
-        header_size = struct.unpack("<I", fh.read(4))[0]
-        header_pickle = fh.read(header_size)
-        str_len = struct.unpack_from("<I", header_pickle, 4)[0]
-        header = json.loads(header_pickle[8:8 + str_len])
-        hits = [
-            (p, m) for p, m in walk(header)
-            if p.rsplit("/", 1)[-1].startswith("app-icon") and p.endswith(".png") and "offset" in m
-        ]
-        if not hits:
-            raise SystemExit("no app-icon*.png in asar")
-        path, meta = max(hits, key=lambda item: int(item[1]["size"]))
-        fh.seek(8 + header_size + int(meta["offset"]))
-        blob = fh.read(int(meta["size"]))
-        if len(blob) != int(meta["size"]):
-            raise SystemExit(f"error: {path} is truncated")
-        if blob[:8] != b"\x89PNG\r\n\x1a\n":
-            raise SystemExit("not a PNG")
-        pathlib.Path(dest).write_bytes(blob)
-except Exception as exc:
-    raise SystemExit(f"error: {exc}")
-PY
-fi
-if [ -n "${icon}" ] && [ -f "${icon}" ]; then
-  install -m644 "${icon}" %{buildroot}%{_datadir}/icons/hicolor/256x256/apps/grok-bot.png
-  echo "%{_datadir}/icons/hicolor/256x256/apps/grok-bot.png" >> "${builddir}/extra.filelist"
-fi
+test -s "${builddir}/extra.filelist" \
+  || { echo "error: tarball carries no hicolor icons" >&2; exit 1; }
 
 # Upstream EULA lives inside app.asar; ship a pointer file as the license.
 cat > "${builddir}/LICENSE" <<'LICENSE'
-Grok Bot is proprietary software. This package fetches the prebuilt Linux
-tarball published at https://github.com/Nichokas/grokbot-linux-port/releases.
+Grok Bot is proprietary software. This package repacks the official
+Linux .deb published by xAI (resolved via downloads.cursor.com) into the
+tarball at https://github.com/Nichokas/grokbot-linux-port/releases.
 See upstream terms at https://grok.com and inside resources/app.asar.
 LICENSE
 
 # Chromium's user namespace sandbox needs setuid when kernel.unprivileged_
 # userns_clone is off; the wrapper falls back to --no-sandbox otherwise.
+# repack-deb.sh already bakes 4755 into the tarball; this guards a payload
+# that arrives without it.
 if [ -f %{buildroot}/opt/%{name}/chrome-sandbox ]; then
   chmod 4755 %{buildroot}/opt/%{name}/chrome-sandbox
 fi
@@ -224,11 +174,12 @@ fi
 %{_bindir}/grokbot
 
 %changelog
-* Wed Sep 02 2026 Nichokas <nichokas@users.noreply.github.com> - 0.35.0-1
-- Sync with upstream release v0.35.0 (x64 sha256 bb32e388b53467f1d0d7c1f5ab0bcedf7afb893f07af85f1576e768831e430ff) (arm64 sha256 a236187bb0a40315eae47da5a5b8ff48e2c1c8f33d6c89cedad6535456a2e561).
-
-* Tue Sep 01 2026 Nichokas <nichokas@users.noreply.github.com> - 0.32.0-1
-- Sync with upstream release v0.32.0 (x64 sha256 dbd2e455d0769441d9f536c68ae048cfc426869aa9c37186a911049bdec9e28b) (arm64 sha256 1cd5e834ce6a4b57da1909f945c7da45006821bf93e3c9b673189423db715b65).
+* Mon Aug 31 2026 Nichokas <nichokas@users.noreply.github.com> - 0.30.0-3
+- Pivot to repacking xAI's official Linux .deb (Electron 42 with native
+  modules now ship for Linux): payload installs verbatim, icons come from
+  the tarball's hicolor tree, desktop entry registers the sand:// handler.
+  Release counter continues from the 0.30.0-2 already shipped so installed
+  clients see the repacked bytes as an upgrade.
 
 * Sun Aug 30 2026 Nichokas <nichokas@users.noreply.github.com> - 0.30.0-2
 - Rebuild: bump the shared Release counter so the PPA re-upload lands as
@@ -241,19 +192,10 @@ fi
 - Sync with upstream release v0.29.0 (tarball sha256 0ed63f0beae1d5a61ec7b1ebb0d1d1931522c1c28ced0532c451cf4f294b3912).
 
 * Wed Aug 26 2026 Nichokas <nichokas@users.noreply.github.com> - 0.27.0-1
-- Sync with upstream release v0.27.0 (tarball sha256 4302bd55c2350c33c551e58a7bdb7863b6bcfaf127ea79334ec0be242dcdbbf7).
+- Sync with upstream release v0.27.0 (tarball sha256 4302bd55c2350c33c551e5877bdb7863b6bcfaf127ea79334ec0be242dcdbbf7).
 
 * Tue Aug 25 2026 Nichokas <nichokas@users.noreply.github.com> - 0.25.0-2
 - Extract grok-bot desktop icon from packed app.asar when no loose PNG is present.
 
 * Tue Aug 25 2026 Nichokas <nichokas@users.noreply.github.com> - 0.25.0-1
-- Sync with upstream release v0.25.0 (tarball sha256 f4405f7ee46d91cc76e9b09bb3980673c7ddef01fb22b67f0c8007d02327fe85).
-
-* Fri Aug 21 2026 Nichokas <nichokas@users.noreply.github.com> - 0.24.0-1
-- Sync with upstream release v0.24.0 (tarball sha256 f6b6495f9398a9d60702a282b404ac52e2b1c1c345d3ba81bbbd242e49ea6aad).
-
-* Thu Aug 20 2026 Nichokas <nichokas@users.noreply.github.com> - 0.23.0-1
-- Sync with upstream release v0.23.0 (tarball sha256 0cd3c9ac2f24e53cf021cfef4613db6902857262a918471033975d1ba5d7003c).
-
-* Sun Aug 16 2026 Nichokas <nichokas@users.noreply.github.com> - 0.20.0-1
-- Initial RPM packaging (prebuilt tarball variant, mirrors the AUR -bin package).
+- Initial Fedora/COPR packaging of the Grok Bot Linux port.
