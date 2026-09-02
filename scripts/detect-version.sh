@@ -70,16 +70,19 @@ emit_outputs() {
   local version="$1"
   local is_new="$2"
   local rebuild="${3:-false}"
+  local commit="${4:-}"
 
   echo "version=${version}"
   echo "is_new=${is_new}"
   echo "rebuild=${rebuild}"
+  echo "commit=${commit}"
 
   if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     {
       echo "version=${version}"
       echo "is_new=${is_new}"
       echo "rebuild=${rebuild}"
+      echo "commit=${commit}"
     } >> "${GITHUB_OUTPUT}"
   fi
 }
@@ -111,7 +114,10 @@ main() {
   echo "api2 stable: version=${ver} commit=${sha} (base: ${base})" >&2
 
   local is_new="false" rebuild="false"
-  if [[ "${ver}" != "${base}" ]]; then
+  # Only a strictly greater semver is new: an upstream rollback (VERSION says
+  # 0.31.0, api2 serves 0.30.1) must not "update" the packages to an older
+  # version — package managers would never offer it as an upgrade.
+  if [[ "${ver}" != "${base}" && "$(printf '%s\n' "${base}" "${ver}" | sort -V | tail -n 1)" == "${ver}" ]]; then
     is_new="true"
   elif [[ -n "${dispatch}" ]]; then
     # Dispatching the current base version means "rebuild it": repack or
@@ -121,7 +127,7 @@ main() {
     rebuild="true"
   fi
 
-  emit_outputs "${ver}" "${is_new}" "${rebuild}"
+  emit_outputs "${ver}" "${is_new}" "${rebuild}" "${sha}"
   printf '%s\n' "${ver}"
 }
 

@@ -60,6 +60,7 @@ jobs:
       version: ${{ steps.detect.outputs.version }}
       is_new: ${{ steps.detect.outputs.is_new }}
       rebuild: ${{ steps.detect.outputs.rebuild }}
+      commit: ${{ steps.detect.outputs.commit }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -149,11 +150,15 @@ jobs:
         if: steps.need_build.outputs.needed == 'true'
         env:
           GROK_VERSION: ${{ needs.detect-version.outputs.version }}
+          GROK_COMMIT: ${{ needs.detect-version.outputs.commit }}
           GROKBOT_CACHE_DIR: ${{ github.workspace }}/.cache/debs
         run: |
           set -euo pipefail
           echo "Repacking Grok Bot ${GROK_VERSION} (official .deb -> release tarballs)"
-          bash scripts/repack-deb.sh --version "${GROK_VERSION}"
+          # version+commit so a manifest change between detect and this job
+          # fails the repack instead of mixing upstream commits under one
+          # release (both arches must still serve the validated commit).
+          bash scripts/repack-deb.sh --version "${GROK_VERSION}+${GROK_COMMIT}"
           echo "Build artefacts:"
           ls -lh dist/ || true
 

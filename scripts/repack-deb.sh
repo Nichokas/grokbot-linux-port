@@ -38,10 +38,11 @@ Options:
   --arch <x64|arm64>             Build only this arch (default: both)
   --deb-x64 <file>               Use a local x64 .deb instead of downloading
   --deb-arm64 <file>              Use a local arm64 .deb instead of downloading
-  --version <x.y.z>               Require the resolved version to equal this
-                                  (CI passes the detected version so a racing
-                                  republication fails here, not as a tarball
-                                  named for a version it does not contain)
+  --version <x.y.z[+sha]>          Require the resolved version to equal this,
+                                  optionally with the commitSha appended after
+                                  '+' so a manifest change between the detect
+                                  job and this repack fails here instead of
+                                  mixing commits under one release
   -h, --help                      Show this help
 EOF
 }
@@ -58,7 +59,7 @@ while [[ $# -gt 0 ]]; do
       ARCHES=("$2"); shift 2 ;;
     --deb-x64)  DEB_OVERRIDE[x64]="${2:?--deb-x64 requires a path}";  shift 2 ;;
     --deb-arm64) DEB_OVERRIDE[arm64]="${2:?--deb-arm64 requires a path}"; shift 2 ;;
-    --version) EXPECT_VERSION="${2:?--version requires x.y.z}"; shift 2 ;;
+    --version) EXPECT_VERSION="${2:?--version requires x.y.z or x.y.z+<commitSha>}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument '$1'" ;;
   esac
@@ -66,43 +67,48 @@ done
 
 # ---------------------------------------------------------------------------
 # resolve_arch — canonical download JSON for one arch.
-# Prints "version debUrl" (whitespace-free fields) on stdout.
+# Prints "version commitSha debUrl" (whitespace-free fields) on stdout.
 # ---------------------------------------------------------------------------
 resolve_arch() {
-  local api_arch="$1" json ver url
+  local api_arch="$1" json ver sha url
   api_arch="linux-${1}"
   # shellcheck disable=SC2059
   json="$(curl --fail --silent --show-error --max-time 30 --retry 3 \
     "$(printf "${API_JSON_URL_TEMPLATE}" "${api_arch}")")" \
     || die "api2 download JSON unavailable for ${api_arch}"
   ver="$(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' <<<"${json}" | head -n 1)"
+  sha="$(sed -n 's/.*"commitSha":"\([^"]*\)".*/\1/p' <<<"${json}" | head -n 1)"
   url="$(sed -n 's/.*"debUrl":"\([^"]*\)".*/\1/p' <<<"${json}" | head -n 1)"
-  [[ -n "${ver}" && -n "${url}" ]] || die "cannot parse version/debUrl from ${api_arch} JSON: ${json}"
+  [[ -n "${ver}" && -n "${sha}" && -n "${url}" ]] || die "cannot parse version/commitSha/debUrl from ${api_arch} JSON: ${json}"
   [[ "${url}" == *.deb ]] || die "${api_arch} debUrl is not a .deb: ${url}"
-  printf '%s %s' "${ver}" "${url}"
+  printf '%s %s %s' "${ver}" "${sha}" "${url}"
 }
 
 # ---------------------------------------------------------------------------
-# fetch — download url into dst, using GROKBOT_CACHE_DIR when set (CI volume).
-# A cached file must still carry the ar magic or it is re-fetched: a truncated
-# earlier download must not poison the release tarball.
+# fetch — download url, using GROKBOT_CACHE_DIR when set (CI volume), and
+# print the stored path on stdout. A cached file must still carry the ar
+# magic or it is re-fetched: a truncated earlier download must not poison
+# the release tarball. The cache IS the storage (no second copy elsewhere),
+# so cache-on/cache-off only changes where the deb lives.
 # ---------------------------------------------------------------------------
 fetch() {
-  local url="$1" dst="$2" cached=""
+  local url="$1" dst
   if [[ -n "${CACHE_DIR}" ]]; then
     mkdir -p "${CACHE_DIR}"
-    cached="${CACHE_DIR}/$(basename "${url}")"
-    if [[ -s "${cached}" ]] && head -c 8 "${cached}" | grep -q '^!<arch>'; then
-      echo "cache hit: ${cached}" >&2
-      cp "${cached}" "${dst}"
+    dst="${CACHE_DIR}/$(basename "${url}")"
+    if [[ -s "${dst}" ]] && head -c 8 "${dst}" | grep -q '^!<arch>'; then
+      echo "cache hit: ${dst}" >&2
+      printf '%s' "${dst}"
       return
     fi
+  else
+    dst="$(mktemp -t grokbot-deb-XXXXXX.deb)"
   fi
   curl --fail --silent --show-error --location --max-time 600 --retry 3 \
     --output "${dst}.tmp" "${url}"
   mv "${dst}.tmp" "${dst}"
   [[ -s "${dst}" ]] || die "download produced empty ${dst}"
-  if [[ -n "${cached}" ]]; then cp "${dst}" "${cached}"; fi
+  printf '%s' "${dst}"
 }
 
 # ---------------------------------------------------------------------------
@@ -196,25 +202,39 @@ main() {
   for arch in "${ARCHES[@]}"; do resolved+=("$(resolve_arch "${arch}")"); done
 
   # A partial upstream republication must not yield two tarballs with
-  # different versions under one release.
-  local -A versions=()
-  for line in "${resolved[@]}"; do versions["${line%% *}"]=1; done
-  [[ ${#versions[@]} -eq 1 ]] || die "api2 disagrees on version across arches: ${resolved[*]}"
+  # different versions — or different commits under one version — in a
+  # single release. This re-resolves the manifest the detect job already
+  # validated, so a change between detect and repack fails here too.
+  # Keyed on "version commit"; the URL differs per arch by design.
+  local -a keys=()
+  local r_ver r_sha r_url
+  for line in "${resolved[@]}"; do
+    read -r r_ver r_sha r_url <<<"${line}"
+    keys+=("${r_ver} ${r_sha}")
+  done
+  local -A seen=()
+  for line in "${keys[@]}"; do seen["${line}"]=1; done
+  [[ ${#seen[@]} -eq 1 ]] || die "api2 disagrees on version/commit across arches: ${keys[*]}"
   local version="${resolved[0]%% *}"
-  [[ -z "${EXPECT_VERSION}" || "${EXPECT_VERSION}" == "${version}" ]] \
-    || die "resolved ${version} but expected ${EXPECT_VERSION}"
+  local commit="${resolved[0]#* }"; commit="${commit%% *}"
+  local expect="${EXPECT_VERSION%%+*}"
+  [[ -z "${expect}" || "${expect}" == "${version}" ]] \
+    || die "resolved ${version} but expected ${expect}"
+  local expect_commit="${EXPECT_VERSION#*+}"
+  if [[ "${EXPECT_VERSION}" == *+* ]]; then
+    [[ "${expect_commit}" == "${commit}" ]] \
+      || die "resolved commit ${commit} but expected ${expect_commit}"
+  fi
 
   local i url deb_path
   for i in "${!ARCHES[@]}"; do
     arch="${ARCHES[$i]}"; line="${resolved[$i]}"
-    version="${line%% *}"; url="${line#* }"
+    version="${line%% *}"; url="${line##* }"
     if [[ -n "${DEB_OVERRIDE[${arch}]:-}" ]]; then
       deb_path="${DEB_OVERRIDE[${arch}]}"
       [[ -f "${deb_path}" ]] || die "--deb: ${deb_path} does not exist"
     else
-      deb_path="${REPO_ROOT}/.cache/debs/$(basename "${url}")"
-      mkdir -p "$(dirname "${deb_path}")"
-      fetch "${url}" "${deb_path}"
+      deb_path="$(fetch "${url}")"
     fi
     repack "${arch}" "${deb_path}" "${version}"
   done

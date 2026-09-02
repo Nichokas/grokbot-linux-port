@@ -82,16 +82,12 @@ PKG_DIR="${REPO_ROOT}/aur/grokbot-linux-port-bin"
 PKG_BUILD="${PKG_DIR}/PKGBUILD"
 [[ -f "${PKG_BUILD}" ]] || { echo "error: ${PKG_BUILD} missing" >&2; exit 1; }
 
-if [[ "${BIN_ONLY}" != "true" ]]; then
-  sed -i -E "s/^pkgver=.*/pkgver=${VER}/" "${PKG_BUILD}"
-fi
-
 # -bin: fetch each arch's tarball sum independently. Caller-supplied sums
 # (--bin-sum-x64 / --bin-sum-arm64) take precedence so the release job can
 # hand off fresh bytes without a re-download race. Hashing the release URL is
 # the fallback for a manual invocation; an arch whose tarball is absent from
 # the release leaves its slot empty and the guard below skips the bump.
-if [[ -z "${BIN_SUM_X64}" ]]; then
+if [[ "${BIN_ONLY}" != "true" ]]; then
   url="https://github.com/Nichokas/grokbot-linux-port/releases/download/v${VER}/Grok_Bot_${VER}_linux_x64.tar.gz"
   echo "Hashing release tarball: ${url}" >&2
   if curl --head --fail --silent --location --max-time 15 "${url}" >/dev/null 2>&1; then
@@ -121,6 +117,13 @@ if [[ -z "${BIN_SUM_X64}" || -z "${BIN_SUM_ARM64}" ]]; then
   echo "warn: only one arch sum present (x64=${BIN_SUM_X64:-<empty>} arm64=${BIN_SUM_ARM64:-<empty>}); skipping -bin bump to avoid a stale checksum" >&2
   echo "done — review with: git diff aur/"
   exit 0
+fi
+
+# pkgver is only rewritten once the bump is certain to complete: an early
+# exit above must leave the PKGBUILD untouched, not pinned to a new pkgver
+# with the old checksums still attached.
+if [[ "${BIN_ONLY}" != "true" ]]; then
+  sed -i -E "s/^pkgver=.*/pkgver=${VER}/" "${PKG_BUILD}"
 fi
 
 if [[ "${BIN_ONLY}" == "true" ]]; then
