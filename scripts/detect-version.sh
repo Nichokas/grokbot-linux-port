@@ -1,46 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# detect-version.sh — version-anchored HEAD-probing discovery for Grok Bot
+# detect-version.sh — read the current Grok Bot version from api2's canonical
+# download JSON
 #
-# Reads the current base version from the VERSION file, generates an ordered
-# semver candidate set covering non-linear jumps, HEAD-probes each artifact URL
-# on win32-x64 (and optionally darwin-x64 for cross-platform confirmation),
-# selects the highest semver candidate returning HTTP 200 as the latest version,
-# and emits outputs suitable for both local invocation and GitHub Actions.
+# Historically this script HEAD-probed semver candidates against the win32
+# bucket because upstream exposed no listing and no manifest. That is no
+# longer necessary: api2 serves the canonical download manifest for the
+# Linux builds at
+#   https://api2.cursor.sh/updates/api/download/stable/linux-<arch>/sand
+# (app name "sand", per the deb's Provides: sand), whose JSON carries
+# version, commitSha and the AppImage/deb/rpm URLs for the current release.
+# One GET per arch replaces the whole candidate sweep; the two arches must
+# agree, which also catches a half-republished upstream.
 #
 # Usage:
-#   scripts/detect-version.sh                  # autonomous probing
-#   scripts/detect-version.sh 0.19.0           # validate explicit version (workflow_dispatch)
-#   INPUT_VERSION=0.19.0 scripts/detect-version.sh  # Actions input passthrough
+#   scripts/detect-version.sh                  # resolve latest
+#   scripts/detect-version.sh 0.30.0           # validate explicit version (workflow_dispatch)
+#   INPUT_VERSION=0.30.0 scripts/detect-version.sh  # Actions input passthrough
 #
-# Rationale for HEAD probing: the Grok Bot distribution bucket at
-# downloads.cursor.com does not expose S3 ?list-type=2 listings (AccessDenied)
-# nor a latest.yml manifest (403). Direct HEAD against the deterministic
-# artifact path is the sole reliable existence signal.
+# Outputs (stdout + $GITHUB_OUTPUT when present): version, is_new, rebuild.
+# The bare version is also the script's last stdout line for $(...) callers.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 VERSION_FILE="${REPO_ROOT}/VERSION"
 
-WIN32_URL_TEMPLATE="https://downloads.cursor.com/grokbot/stable/win32-x64/%s/Grok_Bot_%s_Setup.exe"
-DARWIN_URL_TEMPLATE="https://downloads.cursor.com/grokbot/stable/darwin-x64/%s/Grok_Bot_%s_x64.dmg"
+API_JSON_URL_TEMPLATE="https://api2.cursor.sh/updates/api/download/stable/%s/sand"
 
-# ---------------------------------------------------------------------------
-# Resolve current base version
-# ---------------------------------------------------------------------------
 read_base_version() {
   if [[ -f "${VERSION_FILE}" ]]; then
     # shellcheck disable=SC2002
     cat "${VERSION_FILE}" | tr -d '[:space:]'
   else
-    echo "0.18.0"
+    echo "0.30.0"
   fi
 }
 
-# ---------------------------------------------------------------------------
-# Resolve dispatched version (CLI arg > INPUT_VERSION env > empty)
-# ---------------------------------------------------------------------------
 resolve_dispatch_version() {
   if [[ $# -gt 0 && -n "${1:-}" ]]; then
     printf '%s' "$1"
@@ -54,184 +50,85 @@ resolve_dispatch_version() {
 }
 
 # ---------------------------------------------------------------------------
-# HEAD probe — returns 0 when the artifact exists (HTTP 200)
+# fetch_arch_json — GET the canonical manifest for one arch and print the
+# "version commitSha" pair (whitespace-free fields) on stdout.
 # ---------------------------------------------------------------------------
-probe_url() {
-  local url="$1"
-  local code
-  code="$(curl --head --fail --silent --location --max-time 10 --retry 2 \
-    -o /dev/null -w "%{http_code}" "${url}" 2>/dev/null || true)"
-  [[ "${code}" == "200" ]]
-}
-
-probe_version() {
-  local ver="$1"
-  local win32_url darwin_url
+fetch_arch_json() {
+  local arch="$1" json ver sha
   # shellcheck disable=SC2059
-  win32_url="$(printf "${WIN32_URL_TEMPLATE}" "${ver}" "${ver}")"
-  if probe_url "${win32_url}"; then
-    return 0
-  fi
-  # darwin is informational only. port.sh downloads the win32 installer
-  # exclusively, so a darwin-200/win32-404 combination would previously mark
-  # the version as existing and then fail the build on the win32 fetch.
-  # Report the mismatch so the scheduled run retries on the next cron tick
-  # instead of burning a build job on a version it cannot download.
-  darwin_url="$(printf "${DARWIN_URL_TEMPLATE}" "${ver}" "${ver}")"
-  if probe_url "${darwin_url}"; then
-    echo "  note: ${ver} exists on darwin but not win32 yet — treating as unavailable (win32 propagation lag)" >&2
-  fi
-  return 1
+  json="$(curl --fail --silent --show-error --max-time 30 --retry 3 \
+    "$(printf "${API_JSON_URL_TEMPLATE}" "linux-${arch}")")" \
+    || { echo "error: api2 manifest unavailable for linux-${arch}" >&2; return 1; }
+  ver="$(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' <<<"${json}" | head -n 1)"
+  sha="$(sed -n 's/.*"commitSha":"\([^"]*\)".*/\1/p' <<<"${json}" | head -n 1)"
+  [[ -n "${ver}" && -n "${sha}" ]] \
+    || { echo "error: cannot parse version/commitSha from linux-${arch} JSON: ${json}" >&2; return 1; }
+  printf '%s %s' "${ver}" "${sha}"
 }
 
-# ---------------------------------------------------------------------------
-# Generate semver candidates from base x.y.z
-#
-# Strategy (bound to ~25 candidates to cap Actions wall time):
-#   1. Patch sweep:  x.y.(z+1) .. x.y.(z+10)
-#   2. Minor sweep:  x.(y+1).0 .. x.(y+10).0  (covers 0.18.0 -> 0.19.0 where
-#      patch-only probing would miss the jump entirely)
-#   3. Next-patch of each minor: x.(y+n).1 for n=1..5
-#   4. Major sweep:  (x+1).0.0 when x < 1, else (x+1).0.0
-# Deduplicate, then sort descending with sort -V so probing order is
-# deterministic and selection is trivially max(sort -V).
-# ---------------------------------------------------------------------------
-generate_candidates() {
-  local base="$1"
-  local major minor patch
-  IFS='.' read -r major minor patch <<< "${base}"
-
-  # Guard against non-numeric parse
-  if ! [[ "${major}" =~ ^[0-9]+$ && "${minor}" =~ ^[0-9]+$ && "${patch}" =~ ^[0-9]+$ ]]; then
-    echo "error: cannot parse base version '${base}' as x.y.z" >&2
-    exit 1
-  fi
-
-  local -a raw=()
-
-  # 1. Patch sweep
-  for i in $(seq 1 10); do
-    raw+=("${major}.${minor}.$((patch + i))")
-  done
-
-  # 2. Minor sweep (y+1 .. y+10)
-  for i in $(seq 1 10); do
-    raw+=("${major}.$((minor + i)).0")
-  done
-
-  # 3. Next-patch of each upcoming minor (y+1 .. y+5) — catches 0.19.1 etc.
-  for i in $(seq 1 5); do
-    raw+=("${major}.$((minor + i)).1")
-  done
-
-  # 4. Major sweep (only meaningful while x < 1)
-  raw+=("$((major + 1)).0.0")
-
-  # Deduplicate while preserving version semantics, then sort descending
-  printf '%s\n' "${raw[@]}" | sort -u -V -r
-}
-
-# ---------------------------------------------------------------------------
-# Emit outputs: stdout + $GITHUB_OUTPUT when running in Actions
-# ---------------------------------------------------------------------------
 emit_outputs() {
   local version="$1"
   local is_new="$2"
   local rebuild="${3:-false}"
+  local commit="${4:-}"
 
-  # Human-readable stdout (Actions log + local run)
   echo "version=${version}"
   echo "is_new=${is_new}"
   echo "rebuild=${rebuild}"
+  echo "commit=${commit}"
 
   if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     {
       echo "version=${version}"
       echo "is_new=${is_new}"
       echo "rebuild=${rebuild}"
+      echo "commit=${commit}"
     } >> "${GITHUB_OUTPUT}"
   fi
 }
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 main() {
-  local base dispatch latest is_new
+  local base dispatch x64 arm64 ver sha
   base="$(read_base_version)"
   dispatch="$(resolve_dispatch_version "${1:-}")"
 
-  # --- Dispatched / pinned version path ----------------------------------
-  if [[ -n "${dispatch}" ]]; then
-    echo "Dispatch version requested: ${dispatch}" >&2
-    if probe_version "${dispatch}"; then
-      echo "Dispatch version ${dispatch} verified (HTTP 200)." >&2
-      # Dispatched version bypasses the > base gate — if it probes 200 it is
-      # authoritative regardless of candidate set, per the fallback contract.
-      if [[ "${dispatch}" == "${base}" ]]; then
-        # Dispatching the current base version means "rebuild it": port.sh
-        # fixes (and thus AUR -bin checksum changes) never reach users
-        # otherwise, since scheduled runs only fire on newer upstream
-        # versions. The release job re-uploads the artifacts and the
-        # AUR bump takes the --bin-only resync path.
-        is_new="false"
-        emit_outputs "${dispatch}" "${is_new}" "true"
-      else
-        # Treat any verified dispatched version differing from base as actionable.
-        is_new="true"
-        emit_outputs "${dispatch}" "${is_new}"
-      fi
-      # Also emit bare version on stdout for capture via $(detect-version.sh)
-      # callers that parse the last line.
-      printf '%s\n' "${dispatch}"
-      exit 0
-    else
-      echo "error: dispatched version ${dispatch} did not return HTTP 200 for win32 or darwin artifact" >&2
-      exit 1
-    fi
+  # Both arches must resolve and agree. A disagreement means upstream is
+  # mid-republish; failing here makes the scheduled run retry on the next
+  # cron tick instead of building two tarballs with different versions.
+  x64="$(fetch_arch_json x64)" || exit 1
+  arm64="$(fetch_arch_json arm64)" || exit 1
+  if [[ "${x64}" != "${arm64}" ]]; then
+    echo "error: api2 x64/arm64 manifests disagree (x64: ${x64}; arm64: ${arm64}) — upstream mid-republish?" >&2
+    exit 1
+  fi
+  ver="${x64%% *}"; sha="${x64#* }"
+
+  # The dispatched version must be what upstream actually serves; a typo or
+  # a stale manual input must not force a build of a version that does not
+  # exist as Linux artefacts.
+  if [[ -n "${dispatch}" && "${dispatch}" != "${ver}" ]]; then
+    echo "error: dispatched version ${dispatch} does not match api2's ${ver} (commit ${sha})" >&2
+    exit 1
   fi
 
-  # --- Autonomous candidate probing path -----------------------------------
-  echo "Base version: ${base}" >&2
+  echo "api2 stable: version=${ver} commit=${sha} (base: ${base})" >&2
 
-  local candidates
-  candidates="$(generate_candidates "${base}")"
-  echo "Probing candidates (descending semver):" >&2
-  echo "${candidates}" | while read -r c; do echo "  - ${c}" >&2; done
-
-  local -a passing=()
-  while IFS= read -r cand; do
-    [[ -z "${cand}" ]] && continue
-    if probe_version "${cand}"; then
-      echo "  HIT  ${cand}" >&2
-      passing+=("${cand}")
-    else
-      echo "  miss ${cand}" >&2
-    fi
-  done <<< "${candidates}"
-
-  if [[ ${#passing[@]} -eq 0 ]]; then
-    echo "No candidate newer than ${base} returned HTTP 200 — base remains latest." >&2
-    emit_outputs "${base}" "false"
-    printf '%s\n' "${base}"
-    exit 0
-  fi
-
-  # Highest passing candidate via semver sort — sort -V respects semver ordering
-  latest="$(printf '%s\n' "${passing[@]}" | sort -V | tail -n 1)"
-  echo "Latest passing candidate: ${latest}" >&2
-
-  # Strictly greater than base?
-  local sorted_max
-  sorted_max="$(printf '%s\n' "${base}" "${latest}" | sort -V | tail -n 1)"
-  if [[ "${sorted_max}" == "${latest}" && "${latest}" != "${base}" ]]; then
+  local is_new="false" rebuild="false"
+  # Only a strictly greater semver is new: an upstream rollback (VERSION says
+  # 0.31.0, api2 serves 0.30.1) must not "update" the packages to an older
+  # version — package managers would never offer it as an upgrade.
+  if [[ "${ver}" != "${base}" && "$(printf '%s\n' "${base}" "${ver}" | sort -V | tail -n 1)" == "${ver}" ]]; then
     is_new="true"
-  else
-    is_new="false"
+  elif [[ -n "${dispatch}" ]]; then
+    # Dispatching the current base version means "rebuild it": repack or
+    # packaging fixes never reach users otherwise, since scheduled runs only
+    # fire on newer upstream versions. The release job re-uploads the
+    # artefacts and the AUR/spec bumps take the resync path.
+    rebuild="true"
   fi
 
-  emit_outputs "${latest}" "${is_new}"
-  printf '%s\n' "${latest}"
+  emit_outputs "${ver}" "${is_new}" "${rebuild}" "${sha}"
+  printf '%s\n' "${ver}"
 }
 
 main "${1:-}"
