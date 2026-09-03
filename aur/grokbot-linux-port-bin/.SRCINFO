@@ -1,6 +1,6 @@
 pkgbase = grokbot-linux-port-bin
 	pkgdesc = Grok Bot desktop agent (repacked from the official Linux .deb)
-	pkgver = 0.30.0
+	pkgver = 0.36.0
 	pkgrel = 4
 	url = https://github.com/Nichokas/grokbot-linux-port
 	arch = x86_64
@@ -28,9 +28,9 @@ pkgbase = grokbot-linux-port-bin
 	provides = grok-bot
 	provides = grokbot
 	conflicts = grok-bot
-	source_x86_64 = Grok_Bot_0.30.0_linux_x64.tar.gz::https://github.com/Nichokas/grokbot-linux-port/releases/download/v0.30.0/Grok_Bot_0.30.0_linux_x64.tar.gz
-	sha256sums_x86_64 = 24641af283ef68a682f42a06c63642292947b468e3bc51271ae1295dcf56e44d
-	source_aarch64 = Grok_Bot_0.30.0_linux_arm64.tar.gz::https://github.com/Nichokas/grokbot-linux-port/releases/download/v0.30.0/Grok_Bot_0.30.0_linux_arm64.tar.gz
-	sha256sums_aarch64 = 05d2439bf8685aff0f460c9fd649fc2e2a3cfb40f4fba9ce513d058f32198324
+	source_x86_64 = Grok_Bot_0.36.0_linux_x64.tar.gz::https://github.com/Nichokas/grokbot-linux-port/releases/download/v0.36.0/Grok_Bot_0.36.0_linux_x64.tar.gz
+	sha256sums_x86_64 = 8085c220956606639dd6b52e89f134418dd0d94d65c40f2a1663460a401d78a0
+	source_aarch64 = Grok_Bot_0.36.0_linux_arm64.tar.gz::https://github.com/Nichokas/grokbot-linux-port/releases/download/v0.36.0/Grok_Bot_0.36.0_linux_arm64.tar.gz
+	sha256sums_aarch64 = 27dce806e818ec74c3f0c874dd1c26dbe8ba14677a8d11dffd6f00121695dbd8
 
 pkgname = grokbot-linux-port-bin

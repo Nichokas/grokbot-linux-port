@@ -11,8 +11,8 @@
 # `rpkg srpm`, which expects this spec at the repository root.
 
 Name:           grokbot-linux-port
-Version:        0.30.0
-Release:        3%{?dist}
+Version:        0.36.0
+Release:        1%{?dist}
 Summary:        Grok Bot desktop agent (repacked from the official Linux .deb)
 
 # Upstream EULA lives inside resources/app.asar; see the installed LICENSE.
@@ -91,12 +91,12 @@ exit 1
 %ifarch aarch64
 rm -rf %{payload_dir}
 tar -xf %{SOURCE1}
-echo "05d2439bf8685aff0f460c9fd649fc2e2a3cfb40f4fba9ce513d058f32198324  %{_sourcedir}/Grok_Bot_0.30.0_linux_arm64.tar.gz" | sha256sum -c -
+echo "27dce806e818ec74c3f0c874dd1c26dbe8ba14677a8d11dffd6f00121695dbd8  %{_sourcedir}/Grok_Bot_0.36.0_linux_arm64.tar.gz" | sha256sum -c -
 cd %{payload_dir}
 %else
 rm -rf %{payload_dir}
 tar -xf %{SOURCE0}
-echo "24641af283ef68a682f42a06c63642292947b468e3bc51271ae1295dcf56e44d  %{_sourcedir}/Grok_Bot_0.30.0_linux_x64.tar.gz" | sha256sum -c -
+echo "8085c220956606639dd6b52e89f134418dd0d94d65c40f2a1663460a401d78a0  %{_sourcedir}/Grok_Bot_0.36.0_linux_x64.tar.gz" | sha256sum -c -
 cd %{payload_dir}
 %endif
 
@@ -174,6 +174,9 @@ fi
 %{_bindir}/grokbot
 
 %changelog
+* Thu Sep 03 2026 Nichokas <nichokas@users.noreply.github.com> - 0.36.0-1
+- Sync with upstream release v0.36.0 (x64 sha256 8085c220956606639dd6b52e89f134418dd0d94d65c40f2a1663460a401d78a0) (arm64 sha256 27dce806e818ec74c3f0c874dd1c26dbe8ba14677a8d11dffd6f00121695dbd8).
+
 * Mon Aug 31 2026 Nichokas <nichokas@users.noreply.github.com> - 0.30.0-3
 - Pivot to repacking xAI's official Linux .deb (Electron 42 with native
   modules now ship for Linux): payload installs verbatim, icons come from
