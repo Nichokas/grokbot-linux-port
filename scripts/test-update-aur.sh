@@ -57,11 +57,12 @@ fake_repo() {
 
 SCENARIO=""
 run_update() {
-  local root="$1"; shift
+  local root="$1" status=0; shift
   printf '\n--- %s\n' "${SCENARIO}" >> "${WORK}/log"
   ( cd "${root}" && env -i PATH="${STUB_BIN}" HOME="${WORK}" \
       STUB_NO_RELEASE="${STUB_NO_RELEASE:-}" bash scripts/update-aur.sh "$@" ) \
-    >> "${WORK}/log" 2>&1 || echo "update-aur.sh exited $?" >> "${WORK}/log"
+    >> "${WORK}/log" 2>&1 || status=$?
+  check "${SCENARIO}: update-aur.sh exits 0" 0 "${status}"
 }
 
 fails=0
