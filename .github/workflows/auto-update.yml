@@ -30,6 +30,7 @@ name: Auto Update
       - "scripts/update-spec.sh"
       - "scripts/update-aur.sh"
       - "scripts/test-update-aur.sh"
+      - "scripts/test-pkgbuild-package.sh"
       - "grokbot-linux-port.spec"
       - "aur/**"
       - ".github/workflows/auto-update.yml"
@@ -182,6 +183,12 @@ jobs:
   # available, else falls back to `bash -n` + `makepkg --printsrcinfo`
   # checks. Only runs on pull_request to avoid duplicate work on
   # scheduled/dispatch.
+  #
+  # Every lint above is static, so none of them enter package(): a ${pkgdir}
+  # path written without being created first passes them all and dies on the
+  # user's machine (issue #12, twice published). The second step builds the
+  # package for real against a stub payload — the AUR twin of spec-lint's
+  # rpmbuild smoke.
   # -----------------------------------------------------------------------
   aur-lint:
     if: github.event_name == 'pull_request'
@@ -224,6 +231,9 @@ jobs:
             fi
           done
           exit "${failed}"
+
+      - name: Smoke-build the AUR package against a stub payload
+        run: bash scripts/test-pkgbuild-package.sh
 
   # -----------------------------------------------------------------------
   # aur-script-test — regression test for the AUR bump script

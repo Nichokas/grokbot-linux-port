@@ -19,6 +19,7 @@ scripts/detect-version.sh        reads the current version from api2's JSON mani
 scripts/repack-deb.sh            official .deb -> deterministic release tarball -> dist/
 scripts/update-aur.sh            bumps aur/ PKGBUILD + .SRCINFO (used by CI release job)
 scripts/test-update-aur.sh       offline regression test for update-aur.sh (PR job aur-script-test)
+scripts/test-pkgbuild-package.sh builds the AUR package for real against a stub payload (PR job aur-lint)
 scripts/update-spec.sh           bumps grokbot-linux-port.spec Version/Release/sha256 (used by CI release job)
 aur/grokbot-linux-port-bin/      AUR package, prebuilt tarball from GitHub Releases
 grokbot-linux-port.spec          RPM spec for COPR — mirrors the AUR -bin package
@@ -81,7 +82,12 @@ non-world-readable directory may ship.
   alone. A supplied `--bin-sum-*` always wins over re-hashing the
   published URL, on both arches. `test-update-aur.sh` pins all of that
   offline. The from-source `grokbot-linux-port` package was removed with
-  the porting pipeline.
+  the porting pipeline. A PKGBUILD-only fix reaches AUR through the
+  release job and nowhere else: `aur-publish` hangs off `release`, gated on
+  `is_new || rebuild` and skipped on `pull_request`, and a push to main is
+  not a trigger at all. So merging a `package()` fix publishes nothing —
+  either wait for the next version (which resets `pkgrel` to 1) or
+  `workflow_dispatch` with the current version to force the rebuild resync.
 - **COPR**: the project uses the **rpkg source method** — COPR clones this
   repo and runs `rpkg srpm`, which requires `grokbot-linux-port.spec` at
   the repo root (name must match the repo). `update-spec.sh` keeps
@@ -112,6 +118,10 @@ rpm -qpl --dump /tmp/rpm/RPMS/x86_64/*.rpm | grep chrome-sandbox   # must be 010
 docker run --rm -v "$PWD/aur/grokbot-linux-port-bin:/pkg:rw,z" archlinux:base-devel \
   sh -c "useradd -m b 2>/dev/null; cp -r /pkg /tmp/p && chown -R b /tmp/p && cd /tmp/p && sudo -u b makepkg --printsrcinfo > /pkg/.SRCINFO"
 
+# AUR: build package() for real against a stub payload, both arches
+docker run --rm -v "$PWD:/repo:ro,z" -w /repo archlinux:base-devel \
+  bash scripts/test-pkgbuild-package.sh
+
 # update-spec.sh dry runs (idempotent no-op when already in sync)
 bash scripts/update-spec.sh --sum-x64 <sha256-x64> --sum-arm64 <sha256-arm64> $(cat VERSION)
 
@@ -132,6 +142,14 @@ Notes learned the hard way:
   `install -Dm644 hicolor/… %{buildroot}%{_datadir}/hicolor/…` ships the
   icon at `/usr/share/hicolor` where nothing finds it. The CI spec-smoke
   exists to catch exactly this class of `%install` bug.
+- Every `cat > "${pkgdir}/…"` / `%{buildroot}` redirect needs its parent
+  directory in the `install -dm755` list: `install -Dm644` creates parents,
+  a heredoc redirect does not. makepkg runs `package()` under `set -e`, so
+  the failed redirect aborts with "A failure occurred in package()" — which
+  is what every AUR install hit on 0.36.0-4 and 0.39.0-4 (issue #12). The
+  static AUR lints cannot see it; `test-pkgbuild-package.sh` is the
+  regression test, and it must stay the thing that fails when a new
+  `${pkgdir}` path shows up without its `install -d`.
 - The payload installs verbatim; `chrome-sandbox` mode 4755 is baked in by
   the repack. Do not add mode-normalisation passes or MZ-header guards —
   those existed because the win32 payload's native modules could ship as
