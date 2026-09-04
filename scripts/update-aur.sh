@@ -87,7 +87,11 @@ PKG_BUILD="${PKG_DIR}/PKGBUILD"
 # hand off fresh bytes without a re-download race. Hashing the release URL is
 # the fallback for a manual invocation; an arch whose tarball is absent from
 # the release leaves its slot empty and the guard below skips the bump.
-if [[ "${BIN_ONLY}" != "true" ]]; then
+# Both arches gate on an empty slot, never on BIN_ONLY: gating x64 on
+# BIN_ONLY re-hashed the published URL on every version bump and overwrote
+# the sum the release job had just handed over, which is the propagation
+# race these flags exist to dodge.
+if [[ -z "${BIN_SUM_X64}" ]]; then
   url="https://github.com/Nichokas/grokbot-linux-port/releases/download/v${VER}/Grok_Bot_${VER}_linux_x64.tar.gz"
   echo "Hashing release tarball: ${url}" >&2
   if curl --head --fail --silent --location --max-time 15 "${url}" >/dev/null 2>&1; then
@@ -122,8 +126,16 @@ fi
 # pkgver is only rewritten once the bump is certain to complete: an early
 # exit above must leave the PKGBUILD untouched, not pinned to a new pkgver
 # with the old checksums still attached.
+cur_ver="$(sed -nE 's/^pkgver=(.*)/\1/p' "${PKG_BUILD}")"
 if [[ "${BIN_ONLY}" != "true" ]]; then
   sed -i -E "s/^pkgver=.*/pkgver=${VER}/" "${PKG_BUILD}"
+  # Arch resets pkgrel to 1 on a new pkgver. Without this the previous
+  # version's rebuild counter rides along, which is how 0.36.0-4 published as
+  # 0.39.0-4 instead of 0.39.0-1. Gated on a real version change so
+  # re-running the same bump cannot undo a rebuild's increment.
+  if [[ "${cur_ver}" != "${VER}" ]]; then
+    sed -i -E "s/^pkgrel=.*/pkgrel=1/" "${PKG_BUILD}"
+  fi
 fi
 
 if [[ "${BIN_ONLY}" == "true" ]]; then

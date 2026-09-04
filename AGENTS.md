@@ -18,6 +18,7 @@ VERSION                          current Grok Bot version (single source of trut
 scripts/detect-version.sh        reads the current version from api2's JSON manifest
 scripts/repack-deb.sh            official .deb -> deterministic release tarball -> dist/
 scripts/update-aur.sh            bumps aur/ PKGBUILD + .SRCINFO (used by CI release job)
+scripts/test-update-aur.sh       offline regression test for update-aur.sh (PR job aur-script-test)
 scripts/update-spec.sh           bumps grokbot-linux-port.spec Version/Release/sha256 (used by CI release job)
 aur/grokbot-linux-port-bin/      AUR package, prebuilt tarball from GitHub Releases
 grokbot-linux-port.spec          RPM spec for COPR — mirrors the AUR -bin package
@@ -74,8 +75,13 @@ non-world-readable directory may ship.
   `-bin` checksum comes from the release job's freshly uploaded bytes
   (`--bin-sum-*`) to avoid GitHub CDN propagation races. The bump is
   skipped unless **both** arch sums are present, so a half-published job
-  can't leave one branch with a stale digest. The from-source
-  `grokbot-linux-port` package was removed with the porting pipeline.
+  can't leave one branch with a stale digest. A new `pkgver` resets
+  `pkgrel` to 1, mirroring the spec's `Release`; only a `--bin-only`
+  rebuild resync increments it, and re-running the same bump leaves it
+  alone. A supplied `--bin-sum-*` always wins over re-hashing the
+  published URL, on both arches. `test-update-aur.sh` pins all of that
+  offline. The from-source `grokbot-linux-port` package was removed with
+  the porting pipeline.
 - **COPR**: the project uses the **rpkg source method** — COPR clones this
   repo and runs `rpkg srpm`, which requires `grokbot-linux-port.spec` at
   the repo root (name must match the repo). `update-spec.sh` keeps
@@ -108,9 +114,18 @@ docker run --rm -v "$PWD/aur/grokbot-linux-port-bin:/pkg:rw,z" archlinux:base-de
 
 # update-spec.sh dry runs (idempotent no-op when already in sync)
 bash scripts/update-spec.sh --sum-x64 <sha256-x64> --sum-arm64 <sha256-arm64> $(cat VERSION)
+
+# AUR bump script: offline regression test (no network, no makepkg)
+bash scripts/test-update-aur.sh
 ```
 
 Notes learned the hard way:
+- `update-aur.sh` must not re-hash a release URL for an arch whose sum the
+  caller already supplied. GitHub's asset CDN can still be serving the
+  previous bytes, and whatever sum lands in the PKGBUILD is what every AUR
+  user's `makepkg` verifies. The x64 branch gated on `--bin-only` instead of
+  on an empty sum slot and silently clobbered the release job's digest on
+  every version bump; both arches now gate on the empty slot.
 - The `.deb`'s hicolor tree ships under `usr/share/icons/hicolor`; the
   tarball moves it to `hicolor/` at the root. When installing from the
   tarball, re-prefix with `icons/` — a plain
