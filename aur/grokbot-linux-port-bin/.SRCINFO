@@ -1,7 +1,7 @@
 pkgbase = grokbot-linux-port-bin
 	pkgdesc = Grok Bot desktop agent (repacked from the official Linux .deb)
 	pkgver = 0.39.0
-	pkgrel = 4
+	pkgrel = 5
 	url = https://github.com/Nichokas/grokbot-linux-port
 	arch = x86_64
 	arch = aarch64

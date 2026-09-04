@@ -3,7 +3,7 @@
 # itself repacked verbatim from xAI's official Linux .deb.
 pkgname=grokbot-linux-port-bin
 pkgver=0.39.0
-pkgrel=4
+pkgrel=5
 pkgdesc="Grok Bot desktop agent (repacked from the official Linux .deb)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/Nichokas/grokbot-linux-port"
@@ -40,7 +40,8 @@ package() {
   fi
 
   install -dm755 "${pkgdir}/opt/${pkgname}" "${pkgdir}/usr/bin" \
-                 "${pkgdir}/usr/share/applications"
+                 "${pkgdir}/usr/share/applications" \
+                 "${pkgdir}/usr/share/licenses/${pkgname}"
 
   # The tarball is repacked verbatim from xAI's official Linux .deb, so its
   # modes are already sane and its native modules are Linux ELF — the
