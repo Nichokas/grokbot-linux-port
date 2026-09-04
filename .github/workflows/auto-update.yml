@@ -18,16 +18,18 @@ name: Auto Update
     # prove itself against the real .deb before merge. Path-filtered so
     # docs/VERSION/README changes don't trigger a ~250 MB download. The
     # release job is separately gated against pull_request below, so a PR
-    # can never publish. update-aur.sh is intentionally excluded here:
-    # it only runs inside the release job, so a PR smoke-build cannot
-    # exercise it — listing it would give false confidence that the AUR
-    # bump path was tested. aur/** is intentionally included so AUR-only
+    # can never publish. update-aur.sh is listed because test-update-aur.sh
+    # exercises its bump paths offline in aur-script-test; neither file
+    # matches need_build's regex, so an AUR-script PR still skips the heavy
+    # download. aur/** is intentionally included so AUR-only
     # PRs still trigger aur-lint; the build job's need_build gate skips
     # the heavy download for those PRs (see build.steps[0]).
     paths:
       - "scripts/repack-deb.sh"
       - "scripts/detect-version.sh"
       - "scripts/update-spec.sh"
+      - "scripts/update-aur.sh"
+      - "scripts/test-update-aur.sh"
       - "grokbot-linux-port.spec"
       - "aur/**"
       - ".github/workflows/auto-update.yml"
@@ -222,6 +224,27 @@ jobs:
             fi
           done
           exit "${failed}"
+
+  # -----------------------------------------------------------------------
+  # aur-script-test — regression test for the AUR bump script
+  #
+  # update-aur.sh only ever runs inside the release job, where a wrong
+  # pkgrel or a stale checksum reaches AUR before anyone reads the diff.
+  # The test stubs curl and PATH, so it drives the real bump, rebuild and
+  # half-published paths with no network and no makepkg, the same shape the
+  # release job runs in.
+  # -----------------------------------------------------------------------
+  aur-script-test:
+    if: github.event_name == 'pull_request'
+    runs-on: namespace-profile-grokbot-lite
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Test update-aur.sh
+        run: bash scripts/test-update-aur.sh
 
   # -----------------------------------------------------------------------
   # spec-lint — validate the RPM spec on PRs touching it
