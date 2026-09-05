@@ -17,6 +17,11 @@ depends=(
 optdepends=('libnotify: desktop notifications')
 provides=('grok-bot' 'grokbot')
 conflicts=('grok-bot')
+# Arch's packaged makepkg.conf enables strip+debug. That splits a
+# useless $pkgname-debug package and runs gdb-add-index / strip over
+# chrome-sandbox after package() sets 4755. The payload is already
+# stripped upstream.
+options=('!strip' '!debug')
 source_x86_64=("Grok_Bot_${pkgver}_linux_x64.tar.gz::https://github.com/Nichokas/grokbot-linux-port/releases/download/v${pkgver}/Grok_Bot_${pkgver}_linux_x64.tar.gz")
 source_aarch64=("Grok_Bot_${pkgver}_linux_arm64.tar.gz::https://github.com/Nichokas/grokbot-linux-port/releases/download/v${pkgver}/Grok_Bot_${pkgver}_linux_arm64.tar.gz")
 sha256sums_x86_64=('b4b499ebd494cf5c4b98a12b7aee0ca6a8a1ced5ffabff4b612372f57a355870')
