@@ -56,7 +56,7 @@ jobs:
   # version in JSON, so detection is exact, not inferred.
   # -----------------------------------------------------------------------
   detect-version:
-    runs-on: namespace-profile-grokbot-lite
+    runs-on: ubuntu-slim
     permissions:
       contents: read
     outputs:
@@ -102,7 +102,7 @@ jobs:
     # resync (repack fixes must reach AUR users); (b) pull_request —
     # smoke-build the pinned VERSION to prove the repack still works.
     if: needs.detect-version.outputs.is_new == 'true' || needs.detect-version.outputs.rebuild == 'true' || github.event_name == 'pull_request'
-    runs-on: namespace-profile-grokbot
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -192,7 +192,7 @@ jobs:
   # -----------------------------------------------------------------------
   aur-lint:
     if: github.event_name == 'pull_request'
-    runs-on: namespace-profile-grokbot-lite
+    runs-on: ubuntu-slim
     container: archlinux:base-devel
     permissions:
       contents: read
@@ -246,7 +246,7 @@ jobs:
   # -----------------------------------------------------------------------
   aur-script-test:
     if: github.event_name == 'pull_request'
-    runs-on: namespace-profile-grokbot-lite
+    runs-on: ubuntu-slim
     permissions:
       contents: read
     steps:
@@ -265,7 +265,7 @@ jobs:
   # -----------------------------------------------------------------------
   spec-lint:
     if: github.event_name == 'pull_request'
-    runs-on: namespace-profile-grokbot-lite
+    runs-on: ubuntu-slim
     container: fedora:latest
     permissions:
       contents: read
@@ -354,7 +354,7 @@ jobs:
     # existing release and resyncs the AUR -bin checksum, without touching
     # VERSION or creating a new tag.
     if: (needs.detect-version.outputs.is_new == 'true' || needs.detect-version.outputs.rebuild == 'true') && github.event_name != 'pull_request'
-    runs-on: namespace-profile-grokbot-lite
+    runs-on: ubuntu-slim
     permissions:
       contents: write
     # surfaced so aur-publish can skip runs where the aur/ tree did not move.
@@ -586,7 +586,7 @@ jobs:
     needs: [release]
     # Only publish when the release changed the AUR tree, and never from a PR.
     if: needs.release.outputs.aur_changed == 'true' && github.event_name != 'pull_request'
-    runs-on: namespace-profile-grokbot-lite
+    runs-on: ubuntu-slim
     permissions:
       contents: read
     steps:
