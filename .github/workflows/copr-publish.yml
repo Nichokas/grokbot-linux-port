@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   copr-publish:
-    runs-on: namespace-profile-grokbot-lite
+    runs-on: ubuntu-slim
     steps:
       - name: Trigger COPR rebuild
         env:
