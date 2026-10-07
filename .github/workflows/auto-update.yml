@@ -56,7 +56,7 @@ jobs:
   # version in JSON, so detection is exact, not inferred.
   # -----------------------------------------------------------------------
   detect-version:
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
@@ -130,16 +130,24 @@ jobs:
             echo "needed=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Namespace cache volume instead of actions/cache: instant NVMe hits,
-      # no upload/download leg, and no key-busting — entries survive script
-      # edits instead of being invalidated by hashFiles. Holds the ~190 MB
-      # of upstream .debs repack-deb.sh fetches (see GROKBOT_CACHE_DIR in
-      # the build step), so PR smoke-builds stop re-downloading per run.
+      # actions/cache instead of Namespace's nscloud-cache-action: that
+      # action only works on Namespace runners with a cache volume attached
+      # and hard-fails otherwise, so it dies on GitHub-hosted runners. Unlike
+      # a cache volume it does cost an upload/download leg, so the key is
+      # version+commit: api2's debUrl rotates per commit, and a
+      # version-only key would let a restored entry shadow the rebuilt
+      # download. Holds the ~190 MB of upstream .debs repack-deb.sh fetches
+      # (see GROKBOT_CACHE_DIR in the build step); restore-keys fall back to
+      # any older entry, which repack-deb.sh re-fetches per basename anyway.
       - name: Restore cached downloads (upstream .debs)
         if: steps.need_build.outputs.needed == 'true'
-        uses: namespacelabs/nscloud-cache-action@v1
+        uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.cache/debs
+          key: grokbot-debs-${{ needs.detect-version.outputs.version }}-${{ needs.detect-version.outputs.commit }}
+          restore-keys: |
+            grokbot-debs-${{ needs.detect-version.outputs.version }}-
+            grokbot-debs-
 
       - name: Install system dependencies
         if: steps.need_build.outputs.needed == 'true'
@@ -192,11 +200,20 @@ jobs:
   # -----------------------------------------------------------------------
   aur-lint:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     container: archlinux:base-devel
     permissions:
       contents: read
     steps:
+      # archlinux:base-devel ships no git and actions/checkout hard-fails
+      # with "Unable to find git" when io.which() comes up empty. Namespace's
+      # runners leaked their host tooling into the container; GitHub-hosted
+      # container jobs mount only the action externals (node), so git has to
+      # be installed before the checkout step. `run:` steps execute inside the
+      # container, which is why this can precede the first `uses:` step.
+      - name: Install git (needed by actions/checkout)
+        run: pacman -Syyu --noconfirm --needed git
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -246,7 +263,7 @@ jobs:
   # -----------------------------------------------------------------------
   aur-script-test:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -265,11 +282,16 @@ jobs:
   # -----------------------------------------------------------------------
   spec-lint:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     container: fedora:latest
     permissions:
       contents: read
     steps:
+      # fedora:latest ships no git either — same "Unable to find git" abort
+      # from actions/checkout on GitHub-hosted runners (see aur-lint).
+      - name: Install git (needed by actions/checkout)
+        run: dnf install -y --setopt=install_weak_deps=False git
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -354,7 +376,7 @@ jobs:
     # existing release and resyncs the AUR -bin checksum, without touching
     # VERSION or creating a new tag.
     if: (needs.detect-version.outputs.is_new == 'true' || needs.detect-version.outputs.rebuild == 'true') && github.event_name != 'pull_request'
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     # surfaced so aur-publish can skip runs where the aur/ tree did not move.
@@ -586,7 +608,7 @@ jobs:
     needs: [release]
     # Only publish when the release changed the AUR tree, and never from a PR.
     if: needs.release.outputs.aur_changed == 'true' && github.event_name != 'pull_request'
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:

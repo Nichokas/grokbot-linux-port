@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   copr-publish:
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     steps:
       - name: Trigger COPR rebuild
         env:
