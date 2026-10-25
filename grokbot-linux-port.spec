@@ -11,7 +11,7 @@
 # `rpkg srpm`, which expects this spec at the repository root.
 
 Name:           grokbot-linux-port
-Version:        0.75.5
+Version:        0.75.8
 Release:        1%{?dist}
 Summary:        Grok Bot desktop agent (repacked from the official Linux .deb)
 
@@ -91,12 +91,12 @@ exit 1
 %ifarch aarch64
 rm -rf %{payload_dir}
 tar -xf %{SOURCE1}
-echo "75fd2976ea030a93e5dae1f22cccc8c3c29685ae325ad1ad6ee2f38caa8d068b  %{_sourcedir}/Grok_Bot_0.75.5_linux_arm64.tar.gz" | sha256sum -c -
+echo "2b17f7e8523ddb5867fcbd286889878556a1c3bba2cc7bd477ee71c678f6136d  %{_sourcedir}/Grok_Bot_0.75.8_linux_arm64.tar.gz" | sha256sum -c -
 cd %{payload_dir}
 %else
 rm -rf %{payload_dir}
 tar -xf %{SOURCE0}
-echo "9c39bee0b3dba87e661be0c858fe4ca0ff7d13b82bf8ac87858ce63774a15f84  %{_sourcedir}/Grok_Bot_0.75.5_linux_x64.tar.gz" | sha256sum -c -
+echo "88d527ffccddfee5bd98672ae8568d4971ec181999b3b02b9b2a7093d01f380e  %{_sourcedir}/Grok_Bot_0.75.8_linux_x64.tar.gz" | sha256sum -c -
 cd %{payload_dir}
 %endif
 
@@ -174,6 +174,9 @@ fi
 %{_bindir}/grokbot
 
 %changelog
+* Sun Oct 25 2026 Nichokas <nichokas@users.noreply.github.com> - 0.75.8-1
+- Sync with upstream release v0.75.8 (x64 sha256 88d527ffccddfee5bd98672ae8568d4971ec181999b3b02b9b2a7093d01f380e) (arm64 sha256 2b17f7e8523ddb5867fcbd286889878556a1c3bba2cc7bd477ee71c678f6136d).
+
 * Sat Oct 24 2026 Nichokas <nichokas@users.noreply.github.com> - 0.75.5-1
 - Sync with upstream release v0.75.5 (x64 sha256 9c39bee0b3dba87e661be0c858fe4ca0ff7d13b82bf8ac87858ce63774a15f84) (arm64 sha256 75fd2976ea030a93e5dae1f22cccc8c3c29685ae325ad1ad6ee2f38caa8d068b).
 
